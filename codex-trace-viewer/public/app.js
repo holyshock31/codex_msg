@@ -31,6 +31,7 @@ const els = {
   textFilter: document.querySelector("#textFilter"),
   limitInput: document.querySelector("#limitInput"),
   conversationView: document.querySelector("#conversationView"),
+  conversationSplitter: document.querySelector("#conversationSplitter"),
   timelineView: document.querySelector("#timelineView"),
   sessionList: document.querySelector("#sessionList"),
   sessionCountLine: document.querySelector("#sessionCountLine"),
@@ -42,6 +43,8 @@ const els = {
   conversationTitle: document.querySelector("#conversationTitle"),
   conversationMeta: document.querySelector("#conversationMeta"),
   conversationMessages: document.querySelector("#conversationMessages"),
+  chatShell: document.querySelector(".chatShell"),
+  detailSplitter: document.querySelector("#detailSplitter"),
   segmentDetail: document.querySelector("#segmentDetail"),
   segmentDetailTitle: document.querySelector("#segmentDetailTitle"),
   segmentDetailMeta: document.querySelector("#segmentDetailMeta"),
@@ -582,6 +585,7 @@ function findSelectedSegment(session) {
 function renderSegmentDetail(selection) {
   if (!selection) {
     els.segmentDetail.classList.remove("open");
+    syncSegmentDetailOpen();
     els.segmentDetailTitle.textContent = "Segment detail";
     els.segmentDetailMeta.textContent = "Select a segment.";
     els.segmentContentPre.textContent = "Select a turn segment to inspect content.";
@@ -599,6 +603,7 @@ function renderSegmentDetail(selection) {
     return displayEvent;
   });
   els.segmentDetail.classList.add("open");
+  syncSegmentDetailOpen();
   els.segmentDetailTitle.textContent = `${block.label} / ${block.meta || block.kind}`;
   els.segmentDetailMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
   els.segmentRawMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
@@ -615,6 +620,75 @@ function openSegmentRaw() {
 function closeSegmentRaw() {
   els.segmentRawModal.classList.remove("open");
   els.segmentRawBackdrop.classList.remove("open");
+}
+
+function syncSegmentDetailOpen() {
+  els.chatShell.classList.toggle("detailOpen", els.segmentDetail.classList.contains("open"));
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function setSessionPaneWidth(width) {
+  const rect = els.conversationView.getBoundingClientRect();
+  const max = Math.max(260, rect.width - 420);
+  const next = clamp(width, 240, max);
+  document.documentElement.style.setProperty("--session-pane-width", `${Math.round(next)}px`);
+}
+
+function setSegmentDetailHeight(height) {
+  const rect = els.chatShell.getBoundingClientRect();
+  const max = Math.max(180, rect.height - 180);
+  const next = clamp(height, 180, max);
+  document.documentElement.style.setProperty("--segment-detail-height", `${Math.round(next)}px`);
+}
+
+function initSplitters() {
+  initPointerResize(els.conversationSplitter, {
+    bodyClass: "resizingVertical",
+    onMove: (event) => {
+      const rect = els.conversationView.getBoundingClientRect();
+      setSessionPaneWidth(event.clientX - rect.left);
+    },
+  });
+
+  initPointerResize(els.detailSplitter, {
+    bodyClass: "resizingHorizontal",
+    onMove: (event) => {
+      const rect = els.chatShell.getBoundingClientRect();
+      setSegmentDetailHeight(rect.bottom - event.clientY);
+    },
+  });
+}
+
+function initPointerResize(handle, { bodyClass, onMove }) {
+  if (!handle) return;
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing");
+    if (bodyClass) document.body.classList.add(bodyClass);
+    handle.setPointerCapture(event.pointerId);
+
+    const move = (moveEvent) => {
+      moveEvent.preventDefault();
+      onMove(moveEvent);
+    };
+    const end = () => {
+      handle.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+      if (bodyClass) document.body.classList.remove(bodyClass);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  });
 }
 
 function sessionThreads(session) {
@@ -1501,5 +1575,6 @@ window.addEventListener("keydown", (event) => {
   if (els.turnOverlay.classList.contains("open")) closeTurnOverlay();
 });
 
+initSplitters();
 await loadInitial();
 connectSse();
