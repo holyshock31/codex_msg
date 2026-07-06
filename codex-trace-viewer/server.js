@@ -209,18 +209,18 @@ function updateConversationStore(event) {
 function resolveConversationSessionId(threadId, metadata, fallbackSessionId, seen = new Set()) {
   if (!threadId || seen.has(threadId)) return fallbackSessionId || threadId;
   seen.add(threadId);
-  const parentThreadId = metadata?.parentThreadId;
-  if (!parentThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
+  const linkedThreadId = metadata?.parentThreadId || metadata?.forkedFromId;
+  if (!linkedThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
 
-  const existingParentSessionId = findConversationSessionIdForThread(parentThreadId);
-  if (existingParentSessionId) return existingParentSessionId;
+  const existingLinkedSessionId = findConversationSessionIdForThread(linkedThreadId);
+  if (existingLinkedSessionId) return existingLinkedSessionId;
 
-  const parentMetadata = getThreadMetadata(parentThreadId);
-  if (parentMetadata) {
-    return resolveConversationSessionId(parentThreadId, parentMetadata, parentMetadata.sessionId || parentThreadId, seen);
+  const linkedMetadata = getThreadMetadata(linkedThreadId);
+  if (linkedMetadata) {
+    return resolveConversationSessionId(linkedThreadId, linkedMetadata, linkedMetadata.sessionId || linkedThreadId, seen);
   }
 
-  return parentThreadId;
+  return linkedThreadId;
 }
 
 function findConversationSessionIdForThread(threadId) {
@@ -324,7 +324,7 @@ function applyConversationThreadMetadata(thread, metadata, rawSessionId = "") {
 
 function applyConversationSessionMetadata(session, thread) {
   if (!thread) return;
-  const rootLike = thread.id === session.id || !thread.parentThreadId;
+  const rootLike = thread.id === session.id || (!thread.parentThreadId && !thread.forkedFromId);
   if (rootLike || !session.title) {
     if (thread.title) session.title = thread.title;
     if (thread.cwd) session.cwd = thread.cwd;
@@ -1035,11 +1035,22 @@ function mergeThreadMetadata(record, source) {
     updatedAt: Math.max(current.updatedAt, updatedAt),
     source: source || current.source,
   });
+  reconcileConversationThreadSession(record.id);
 }
 
 function getThreadMetadata(threadId) {
   if (!threadId) return null;
   return threadMetadata.get(threadId) || null;
+}
+
+function reconcileConversationThreadSession(threadId) {
+  const metadata = getThreadMetadata(threadId);
+  if (!metadata) return;
+  const currentSessionId = findConversationSessionIdForThread(threadId);
+  if (!currentSessionId) return;
+  const nextSessionId = resolveConversationSessionId(threadId, metadata, metadata.sessionId || threadId);
+  if (!nextSessionId || nextSessionId === currentSessionId) return;
+  moveConversationThreadToSession(threadId, nextSessionId);
 }
 
 async function refreshSessionIndexMetadata() {

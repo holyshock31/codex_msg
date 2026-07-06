@@ -762,6 +762,7 @@ function agentLabel(thread) {
   if (nickname && role) return `${nickname} (${role})`;
   if (nickname) return nickname;
   if (role) return role;
+  if (thread.forkedFromId) return "side session";
   return thread.parentThreadId ? "subagent" : "main agent";
 }
 
@@ -914,18 +915,18 @@ function getThread(session, id) {
 function resolveDisplaySessionId(sessionMap, metadataMap, threadId, metadata, fallbackSessionId, seen = new Set()) {
   if (!threadId || seen.has(threadId)) return fallbackSessionId || threadId;
   seen.add(threadId);
-  const parentThreadId = metadata?.parentThreadId;
-  if (!parentThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
+  const linkedThreadId = metadata?.parentThreadId || metadata?.forkedFromId;
+  if (!linkedThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
 
-  const existingParentSessionId = findSessionIdForThread(sessionMap, parentThreadId);
-  if (existingParentSessionId) return existingParentSessionId;
+  const existingLinkedSessionId = findSessionIdForThread(sessionMap, linkedThreadId);
+  if (existingLinkedSessionId) return existingLinkedSessionId;
 
-  const parentMetadata = metadataMap.get(parentThreadId);
-  if (parentMetadata) {
-    return resolveDisplaySessionId(sessionMap, metadataMap, parentThreadId, parentMetadata, parentMetadata.sessionId || parentThreadId, seen);
+  const linkedMetadata = metadataMap.get(linkedThreadId);
+  if (linkedMetadata) {
+    return resolveDisplaySessionId(sessionMap, metadataMap, linkedThreadId, linkedMetadata, linkedMetadata.sessionId || linkedThreadId, seen);
   }
 
-  return parentThreadId;
+  return linkedThreadId;
 }
 
 function findSessionIdForThread(sessionMap, threadId) {
@@ -1018,7 +1019,7 @@ function applyThreadMetadata(thread, metadata, rawSessionId = "") {
 
 function applySessionMetadata(session, thread) {
   if (!thread) return;
-  const rootLike = thread.id === session.id || !thread.parentThreadId;
+  const rootLike = thread.id === session.id || (!thread.parentThreadId && !thread.forkedFromId);
   if (rootLike || !session.title) {
     if (thread.title) session.title = thread.title;
     if (thread.cwd) session.cwd = thread.cwd;
