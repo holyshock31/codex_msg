@@ -172,12 +172,13 @@ function updateConversationStore(event) {
   const threadId = event.threadId || event.rawJson?.params?.threadId || event.rawJson?.params?.thread_id;
   if (!threadId) return;
   const metadata = getThreadMetadata(threadId);
-  const sessionId = event.sessionId || metadata?.sessionId || threadId;
-  migrateConversationThread(threadId, sessionId);
+  const sessionId = resolveConversationSessionId(threadId, metadata, event.sessionId || threadId);
+  moveConversationThreadToSession(threadId, sessionId);
 
   const session = getConversationSession(sessionId);
   const thread = getConversationThread(session, threadId);
-  applyConversationThreadMetadata(thread, metadata);
+  thread.displaySessionId = session.id;
+  applyConversationThreadMetadata(thread, metadata, event.sessionId);
   applyConversationSessionMetadata(session, thread);
   session.events += 1;
   thread.events += 1;
@@ -205,28 +206,61 @@ function updateConversationStore(event) {
   trimConversationSessions();
 }
 
-function migrateConversationThread(threadId, sessionId) {
-  if (!threadId || !sessionId || threadId === sessionId) return;
-  const fallbackSession = conversationSessions.get(threadId);
-  if (!fallbackSession?.threadsById?.has(threadId)) return;
-  const thread = fallbackSession.threadsById.get(threadId);
-  fallbackSession.threadsById.delete(threadId);
-  fallbackSession.threads = fallbackSession.threads.filter((candidate) => candidate.id !== threadId);
-  fallbackSession.events = fallbackSession.threads.reduce((sum, candidate) => sum + candidate.events, 0);
-  fallbackSession.lastTs = fallbackSession.threads.reduce((max, candidate) => Math.max(max, candidate.lastTs || 0), 0);
-  if (!fallbackSession.threads.length) {
-    conversationSessions.delete(threadId);
+function resolveConversationSessionId(threadId, metadata, fallbackSessionId, seen = new Set()) {
+  if (!threadId || seen.has(threadId)) return fallbackSessionId || threadId;
+  seen.add(threadId);
+  const parentThreadId = metadata?.parentThreadId;
+  if (!parentThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
+
+  const existingParentSessionId = findConversationSessionIdForThread(parentThreadId);
+  if (existingParentSessionId) return existingParentSessionId;
+
+  const parentMetadata = getThreadMetadata(parentThreadId);
+  if (parentMetadata) {
+    return resolveConversationSessionId(parentThreadId, parentMetadata, parentMetadata.sessionId || parentThreadId, seen);
+  }
+
+  return parentThreadId;
+}
+
+function findConversationSessionIdForThread(threadId) {
+  for (const session of conversationSessions.values()) {
+    if (session.threadsById?.has(threadId)) return session.id;
+  }
+  return "";
+}
+
+function moveConversationThreadToSession(threadId, sessionId) {
+  if (!threadId || !sessionId) return;
+  const currentSessionId = findConversationSessionIdForThread(threadId);
+  if (!currentSessionId || currentSessionId === sessionId) return;
+  const currentSession = conversationSessions.get(currentSessionId);
+  const thread = currentSession?.threadsById?.get(threadId);
+  if (!currentSession || !thread) return;
+
+  currentSession.threadsById.delete(threadId);
+  currentSession.threads = currentSession.threads.filter((candidate) => candidate.id !== threadId);
+  recalculateConversationSession(currentSession);
+  if (!currentSession.threads.length) {
+    conversationSessions.delete(currentSession.id);
   }
 
   const targetSession = getConversationSession(sessionId);
   if (targetSession.threadsById.has(threadId)) return;
-  thread.sessionId = sessionId;
+  thread.displaySessionId = sessionId;
   targetSession.threadsById.set(threadId, thread);
   targetSession.threads.push(thread);
-  targetSession.events += thread.events;
-  targetSession.lastTs = Math.max(targetSession.lastTs || 0, thread.lastTs || 0);
-  targetSession.source = mergeSourceLabel(targetSession.source, thread.source);
+  recalculateConversationSession(targetSession);
   applyConversationSessionMetadata(targetSession, thread);
+}
+
+function recalculateConversationSession(session) {
+  session.events = session.threads.reduce((sum, candidate) => sum + candidate.events, 0);
+  session.blocks = session.threads.reduce((sum, candidate) => sum + candidate.blocks, 0);
+  session.turnCount = session.threads.reduce((sum, candidate) => sum + candidate.turns.length, 0);
+  session.threadCount = session.threads.length;
+  session.lastTs = session.threads.reduce((max, candidate) => Math.max(max, candidate.lastTs || 0), 0);
+  session.source = session.threads.reduce((label, candidate) => mergeSourceLabel(label, candidate.source), "");
 }
 
 function getConversationSession(id) {
@@ -254,6 +288,7 @@ function getConversationThread(session, id) {
     const thread = {
       id,
       sessionId: session.id,
+      displaySessionId: session.id,
       title: "",
       cwd: "",
       threadPreview: "",
@@ -275,12 +310,12 @@ function getConversationThread(session, id) {
   return session.threadsById.get(id);
 }
 
-function applyConversationThreadMetadata(thread, metadata) {
+function applyConversationThreadMetadata(thread, metadata, rawSessionId = "") {
   if (!metadata) return;
   if (metadata.title) thread.title = metadata.title;
   if (metadata.preview) thread.threadPreview = metadata.preview;
   if (metadata.cwd) thread.cwd = metadata.cwd;
-  if (metadata.sessionId) thread.sessionId = metadata.sessionId;
+  if (metadata.sessionId || rawSessionId) thread.sessionId = metadata.sessionId || rawSessionId;
   if (metadata.parentThreadId) thread.parentThreadId = metadata.parentThreadId;
   if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
   if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
@@ -750,6 +785,7 @@ function serializeConversationThread(thread) {
     id: thread.id,
     threadId: thread.id,
     sessionId: thread.sessionId,
+    displaySessionId: thread.displaySessionId,
     title: thread.title,
     cwd: thread.cwd,
     threadPreview: thread.threadPreview,

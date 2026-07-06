@@ -702,10 +702,11 @@ function buildConversationModel(events, allEvents = events) {
     const threadId = event.threadId || event.rawJson?.params?.threadId || event.rawJson?.params?.thread_id;
     if (!threadId) continue;
     const metadata = threadMetadata.get(threadId);
-    const sessionId = event.sessionId || metadata?.sessionId || threadId;
+    const sessionId = resolveDisplaySessionId(sessionMap, threadMetadata, threadId, metadata, event.sessionId || threadId);
     const session = getSession(sessionMap, sessionId);
     const thread = getThread(session, threadId);
-    applyThreadMetadata(thread, metadata);
+    thread.displaySessionId = session.id;
+    applyThreadMetadata(thread, metadata, event.sessionId);
     applySessionMetadata(session, thread);
     session.events += 1;
     thread.events += 1;
@@ -758,6 +759,7 @@ function getThread(session, id) {
       id,
       threadId: id,
       sessionId: session.id,
+      displaySessionId: session.id,
       title: "",
       cwd: "",
       threadPreview: "",
@@ -777,6 +779,30 @@ function getThread(session, id) {
     session.threads.push(thread);
   }
   return session.threadsById.get(id);
+}
+
+function resolveDisplaySessionId(sessionMap, metadataMap, threadId, metadata, fallbackSessionId, seen = new Set()) {
+  if (!threadId || seen.has(threadId)) return fallbackSessionId || threadId;
+  seen.add(threadId);
+  const parentThreadId = metadata?.parentThreadId;
+  if (!parentThreadId) return metadata?.sessionId || fallbackSessionId || threadId;
+
+  const existingParentSessionId = findSessionIdForThread(sessionMap, parentThreadId);
+  if (existingParentSessionId) return existingParentSessionId;
+
+  const parentMetadata = metadataMap.get(parentThreadId);
+  if (parentMetadata) {
+    return resolveDisplaySessionId(sessionMap, metadataMap, parentThreadId, parentMetadata, parentMetadata.sessionId || parentThreadId, seen);
+  }
+
+  return parentThreadId;
+}
+
+function findSessionIdForThread(sessionMap, threadId) {
+  for (const session of sessionMap.values()) {
+    if (session.threadsById?.has(threadId)) return session.id;
+  }
+  return "";
 }
 
 function buildThreadMetadata(events) {
@@ -848,12 +874,12 @@ function chooseMetadataText(current, next, newer) {
   return newer ? next : current;
 }
 
-function applyThreadMetadata(thread, metadata) {
+function applyThreadMetadata(thread, metadata, rawSessionId = "") {
   if (!metadata) return;
   if (metadata.title) thread.title = metadata.title;
   if (metadata.preview) thread.threadPreview = metadata.preview;
   if (metadata.cwd) thread.cwd = metadata.cwd;
-  if (metadata.sessionId) thread.sessionId = metadata.sessionId;
+  if (metadata.sessionId || rawSessionId) thread.sessionId = metadata.sessionId || rawSessionId;
   if (metadata.parentThreadId) thread.parentThreadId = metadata.parentThreadId;
   if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
   if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
