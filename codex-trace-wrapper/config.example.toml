@@ -1,0 +1,10 @@
+# Copy this file to config.toml and update values only if needed.
+#
+# real_codex is intentionally omitted by default. The wrapper will discover the
+# real Codex CLI from %LOCALAPPDATA%\OpenAI\Codex\bin.
+#
+# trace_dir is also omitted by default. The wrapper will use:
+# %USERPROFILE%\.codex-trace
+daemon_url = "tcp://127.0.0.1:45124"
+fallback_ndjson = false
+queue_capacity = 10000

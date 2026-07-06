@@ -1,0 +1,7 @@
+# Runtime config shipped in release packages.
+#
+# Do not hardcode local user names or Codex build hashes here. The wrapper
+# discovers the real Codex CLI from %LOCALAPPDATA%\OpenAI\Codex\bin.
+daemon_url = "tcp://127.0.0.1:45124"
+fallback_ndjson = false
+queue_capacity = 10000

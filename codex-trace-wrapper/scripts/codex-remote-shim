@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+set -eu
+
+TRACE_BIN="${CODEX_TRACE_BIN:-$HOME/.local/codex_trace/bin}"
+
+CLEAN_PATH="$(printf '%s' "$PATH" | awk -v drop="$TRACE_BIN" '
+BEGIN { RS=":"; ORS="" }
+$0 != "" && $0 != drop {
+  printf "%s%s", sep, $0
+  sep=":"
+}
+')"
+
+case ":$CLEAN_PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) CLEAN_PATH="$HOME/.local/bin:$CLEAN_PATH" ;;
+esac
+
+REAL_CODEX="$(PATH="$CLEAN_PATH" command -v codex || true)"
+if [ -z "$REAL_CODEX" ]; then
+  echo "codex trace shim: real codex not found after removing $TRACE_BIN from PATH" >&2
+  exit 127
+fi
+
+if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "proxy" ]; then
+  export PATH="$CLEAN_PATH"
+  exec "$TRACE_BIN/codex-proxy-trace" --real-codex "$REAL_CODEX" "$@"
+fi
+
+export PATH="$CLEAN_PATH"
+exec "$REAL_CODEX" "$@"

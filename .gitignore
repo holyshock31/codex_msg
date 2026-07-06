@@ -1,0 +1,23 @@
+# Runtime data
+codex-trace-viewer/logs/
+*.log
+*.pid
+
+# Local machine configuration
+codex-trace-wrapper/config.toml
+
+# Build and release outputs
+dist/
+codex-trace-wrapper/dist/
+codex-trace-wrapper/target/
+
+# Generated protocol schema cache
+tmp-schema/
+
+# Dependencies and caches
+node_modules/
+.npm/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
