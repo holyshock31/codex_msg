@@ -60,10 +60,10 @@ Timeline / Full info = 给人调试，保留协议事件
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
 
-- `CODEX_TRACE_WRAPPER_CONFIG` 可以继续指向源码目录里的配置文件：
+- `CODEX_TRACE_WRAPPER_CONFIG` 应指向 wrapper exe 同目录的运行时配置：
 
 ```text
-<clone-directory>\codex-trace-wrapper\config.toml
+C:\Users\<user>\Documents\CodexTrace\bin\config.toml
 ```
 
-- 后续如果受管理环境分发或安装，应默认复制 wrapper 到 `C:\Users\<user>\Documents\CodexTrace\bin\`，不要直接从 D 盘开发目录、`AppData\Local`、`Temp`、`Downloads` 等目录启动。
+- 后续如果受管理环境分发或安装，应默认复制 wrapper 和 `config.toml` 到 `C:\Users\<user>\Documents\CodexTrace\bin\`，不要直接从 D 盘开发目录、`AppData\Local`、`Temp`、`Downloads` 等目录启动。

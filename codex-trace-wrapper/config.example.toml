@@ -8,3 +8,15 @@
 daemon_url = "tcp://127.0.0.1:45124"
 fallback_ndjson = false
 queue_capacity = 10000
+
+# Optional debugging override. When set, the wrapper rewrites Desktop -> app-server
+# turn/start params.summary to this value: auto, concise, detailed, or none.
+# Leave unset for pure passive tracing.
+# reasoning_summary_override = "detailed"
+
+[rewrite]
+# Opt into raw app-server response item notifications by rewriting:
+# - initialize.params.capabilities.experimentalApi = true
+# - thread/start.params.experimentalRawEvents = true
+# This is not passive tracing; leave disabled unless you need rawResponseItem/*.
+enable_experimental_raw_events = false

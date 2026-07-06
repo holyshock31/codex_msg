@@ -34,6 +34,7 @@ if (Test-Path -Path $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 
 Copy-Item -Path (Join-Path $Root "install.ps1") -Destination (Join-Path $PackageRoot "install.ps1") -Force
+Copy-Item -Path (Join-Path $Root "codex-trace.ps1") -Destination (Join-Path $PackageRoot "codex-trace.ps1") -Force
 Copy-Item -Path (Join-Path $Root "start.ps1") -Destination (Join-Path $PackageRoot "start.ps1") -Force
 Copy-Item -Path (Join-Path $Root "stop.ps1") -Destination (Join-Path $PackageRoot "stop.ps1") -Force
 Copy-Item -Path (Join-Path $Root "status.ps1") -Destination (Join-Path $PackageRoot "status.ps1") -Force
@@ -43,6 +44,7 @@ Copy-Item -Path (Join-Path $Root "docs\distribution-user-guide.md") -Destination
 
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "bin") | Out-Null
 Copy-Item -Path $WrapperExe -Destination (Join-Path $PackageRoot "bin\codex-trace-wrapper.exe") -Force
+Copy-Item -Path (Join-Path $Root "tools\release-config.toml") -Destination (Join-Path $PackageRoot "bin\config.toml") -Force
 
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "scripts") | Out-Null
 Copy-Item -Path (Join-Path $Root "scripts\enable-desktop-trace.ps1") -Destination (Join-Path $PackageRoot "scripts\enable-desktop-trace.ps1") -Force

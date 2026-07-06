@@ -32,8 +32,8 @@ dist/
 ## 启动开发版 Viewer
 
 ```powershell
-cd <clone-directory>\codex-trace-viewer
-.\scripts\start-viewer.ps1
+cd <clone-directory>
+.\codex-trace.ps1 start
 ```
 
 访问：
@@ -45,9 +45,30 @@ http://127.0.0.1:45123/?v=chat-redesign
 状态和停止：
 
 ```powershell
-.\scripts\status-viewer.ps1
-.\scripts\stop-viewer.ps1
+.\codex-trace.ps1 status
+.\codex-trace.ps1 stop
 ```
+
+`codex-trace-viewer\scripts\start-viewer.ps1`、`stop-viewer.ps1`、`status-viewer.ps1` 保留给组件级调试。Review storage 是 viewer 内部能力，不需要单独启动。
+
+`start` 不会拷贝 wrapper exe，也不会设置 `CODEX_CLI_PATH`。需要从源码目录执行完整初始化时，先构建 wrapper，再运行：
+
+```powershell
+cd <clone-directory>\codex-trace-wrapper
+.\scripts\build-release.ps1
+
+cd <clone-directory>
+.\codex-trace.ps1 install
+```
+
+如果需要捕获 `rawResponseItem/completed` 这类原始 Responses item 通知，可以在安装后的 `bin\config.toml` 或开发配置中打开：
+
+```toml
+[rewrite]
+enable_experimental_raw_events = true
+```
+
+该开关会改写 Desktop -> app-server 请求：给 `initialize` 注入 `capabilities.experimentalApi=true`，给 `thread/start` 注入 `experimentalRawEvents=true`。这不是纯旁路监控，排查完成后可改回 `false`。
 
 ## 构建 Wrapper
 
@@ -80,26 +101,14 @@ node --check .\codex-trace-viewer\public\app.js
 
 ## 开发机启用 Trace
 
-受管理环境环境不要把 `CODEX_CLI_PATH` 直接指向 D 盘源码目录。开发构建完成后，先复制 wrapper 到已验证的安装目录：
+受管理环境环境不要把 `CODEX_CLI_PATH` 直接指向 D 盘源码目录。开发构建完成后，推荐直接走总入口安装：
 
 ```powershell
-$installDir = Join-Path $env:USERPROFILE "Documents\CodexTrace\bin"
-New-Item -ItemType Directory -Force $installDir | Out-Null
-Copy-Item `
-  -LiteralPath "<clone-directory>\codex-trace-wrapper\dist\codex-trace-wrapper.exe" `
-  -Destination (Join-Path $installDir "codex-trace-wrapper.exe") `
-  -Force
+cd <clone-directory>
+.\codex-trace.ps1 install
 ```
 
-再启用：
-
-```powershell
-cd <clone-directory>\codex-trace-wrapper
-$wrapperPath = Join-Path $env:USERPROFILE "Documents\CodexTrace\bin\codex-trace-wrapper.exe"
-.\scripts\enable-codex-trace.ps1 `
-  -WrapperPath $wrapperPath `
-  -ConfigPath "<clone-directory>\codex-trace-wrapper\config.toml"
-```
+安装会把 wrapper 和运行时配置复制到 `$env:USERPROFILE\Documents\CodexTrace\bin\`，并让 `CODEX_CLI_PATH` 指向 `bin\codex-trace-wrapper.exe`、`CODEX_TRACE_WRAPPER_CONFIG` 指向 `bin\config.toml`。
 
 启用后完全退出并重新打开 Codex Desktop。
 
@@ -137,6 +146,7 @@ release zip 的目标结构：
 ```text
 CodexTrace.zip
   install.ps1
+  codex-trace.ps1
   start.ps1
   stop.ps1
   status.ps1
@@ -145,6 +155,7 @@ CodexTrace.zip
   README.md
   bin/
     codex-trace-wrapper.exe
+    config.toml
   scripts/
     enable-desktop-trace.ps1
     disable-desktop-trace.ps1
@@ -162,14 +173,14 @@ CodexTrace.zip
     distribution-user-guide.md
 ```
 
-其中 `codex-trace-wrapper/config.toml` 来自 [tools/release-config.toml](../tools/release-config.toml)，不会包含本机用户名、真实 Codex build hash 或 D 盘路径。
+其中运行时使用的 `bin/config.toml` 来自 [tools/release-config.toml](../tools/release-config.toml)，不会包含本机用户名、真实 Codex build hash 或 D 盘路径。`codex-trace-wrapper/config.toml` 仍随包保留，主要用于排障和兼容旧路径。
 
 ## 本地验证 Release 包
 
 先生成 zip，然后解压到临时目录，执行：
 
 ```powershell
-.\install.ps1 -NoEnable -NoStartViewer
+.\codex-trace.ps1 install -NoEnable -NoStartViewer
 ```
 
 这一步只验证复制结构，不改 Codex Desktop 环境变量、不启动 viewer。
@@ -177,7 +188,7 @@ CodexTrace.zip
 要完整验证安装包流程：
 
 ```powershell
-.\install.ps1
+.\codex-trace.ps1 install
 ```
 
 完整流程会做三件事：
@@ -191,12 +202,15 @@ CodexTrace.zip
 安装后根目录会保留快捷脚本：
 
 ```powershell
-.\start.ps1
-.\stop.ps1
-.\status.ps1
-.\enable-desktop-trace.ps1
-.\disable-desktop-trace.ps1
+.\codex-trace.ps1 install
+.\codex-trace.ps1 start
+.\codex-trace.ps1 status
+.\codex-trace.ps1 stop
+.\codex-trace.ps1 enable
+.\codex-trace.ps1 disable
 ```
+
+`start.ps1`、`stop.ps1`、`status.ps1`、`enable-desktop-trace.ps1`、`disable-desktop-trace.ps1` 也会保留，但只是兼容快捷方式。
 
 ## 公司安全软件注意
 
@@ -215,7 +229,7 @@ Downloads
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
 
-`CODEX_TRACE_WRAPPER_CONFIG` 可以指向安装目录中的配置文件；正式分发时也应使用安装目录内的 `codex-trace-wrapper\config.toml`。
+`CODEX_TRACE_WRAPPER_CONFIG` 应指向安装目录内与 wrapper exe 同目录的 `bin\config.toml`。
 
 ## 前置依赖
 

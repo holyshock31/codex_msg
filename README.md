@@ -2,6 +2,33 @@
 
 这是一个 Codex Desktop 本地 trace viewer：不修改 Codex Desktop 安装包，通过 `CODEX_CLI_PATH` 让 Desktop 先启动 wrapper，再由 wrapper 透明转发 app-server stdio，并把消息复制到本地 viewer。
 
+## 日常入口
+
+日常只需要记一个脚本：
+
+```powershell
+.\codex-trace.ps1 install  # 首次安装：拷贝文件、设置 CODEX_CLI_PATH、启动 viewer
+.\codex-trace.ps1 start    # 启动 viewer，storage 随 viewer 启动
+.\codex-trace.ps1 status   # 查看 Desktop trace、viewer、ingest、storage 状态
+.\codex-trace.ps1 stop     # 停止 viewer，storage 随 viewer 停止
+```
+
+`start` 不会拷贝 wrapper exe，也不会设置 `CODEX_CLI_PATH`。需要完整初始化时用 `install` 或等价的 `setup`。
+
+首次启用或需要重新写入 Codex Desktop 环境变量时：
+
+```powershell
+.\codex-trace.ps1 enable
+```
+
+禁用回退：
+
+```powershell
+.\codex-trace.ps1 disable
+```
+
+`start.ps1`、`status.ps1`、`stop.ps1`、`enable-desktop-trace.ps1`、`disable-desktop-trace.ps1` 只是兼容快捷入口。`scripts/` 和各组件目录下的脚本用于调试和打包，不是日常使用入口。
+
 ## 文档入口
 
 - 本地开发、构建、调试、打 zip 包：见 [docs/development-guide.md](docs/development-guide.md)
@@ -24,4 +51,10 @@ docs/                  # 中文文档
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
+```
+
+运行时配置文件放在 wrapper 同目录：
+
+```text
+C:\Users\<user>\Documents\CodexTrace\bin\config.toml
 ```

@@ -22,6 +22,12 @@ C:\Users\<user>\Documents\CodexTrace
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
 
+运行时配置文件与 wrapper 放在同一目录：
+
+```text
+C:\Users\<user>\Documents\CodexTrace\bin\config.toml
+```
+
 这是项目的稳定默认安装路径。不要把 wrapper 安装到 D 盘开发目录、`AppData\Local`、`Temp` 或 `Downloads`，否则 Codex Desktop 可能报 `spawn EPERM`。
 
 ## 前置条件
@@ -45,7 +51,7 @@ node --version
 3. 执行：
 
 ```powershell
-.\install.ps1
+.\codex-trace.ps1 install
 ```
 
 脚本会做三件事：
@@ -56,13 +62,15 @@ node --version
 
 安装完成后，完全退出并重新打开 Codex Desktop。
 
+`install.ps1` 仍保留为兼容入口，但推荐统一使用 `codex-trace.ps1 install`。
+
 ## 打开 Viewer
 
 安装脚本默认会启动 viewer。也可以手动启动：
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\start.ps1
+.\codex-trace.ps1 start
 ```
 
 打开：
@@ -79,24 +87,35 @@ http://127.0.0.1:45123/?v=chat-redesign
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\start.ps1
+.\codex-trace.ps1 start
 ```
 
 然后打开 Codex Desktop 和 viewer 页面。
 
-如果 viewer 已经在运行，启动脚本会提示端口已被占用；这通常说明无需重复启动。
+如果 viewer 已经在运行，启动脚本会提示已经运行，并显示当前 URL、PID 和 storage 状态。
+
+Review storage 不需要单独启动，它随 viewer 启动和停止。`start` 不会拷贝 wrapper exe，也不会设置 `CODEX_CLI_PATH`；需要完整初始化时用 `install` 或 `setup`。`start.ps1`、`status.ps1`、`stop.ps1` 等旧入口仍保留为兼容快捷方式，但推荐只使用 `codex-trace.ps1`。
+
+如需捕获 `rawResponseItem/completed`，可编辑安装目录的 `bin\config.toml`：
+
+```toml
+[rewrite]
+enable_experimental_raw_events = true
+```
+
+这是协议改写开关，会让 wrapper 给 Desktop 发往 app-server 的请求注入 experimental raw events 参数；排查完成后可改回 `false`。
 
 ## 查看状态
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\status.ps1
+.\codex-trace.ps1 status
 ```
 
 重点确认：
 
 - `CODEX_CLI_PATH` 指向 `Documents\CodexTrace\bin\codex-trace-wrapper.exe`。
-- `CODEX_TRACE_WRAPPER_CONFIG` 指向 `Documents\CodexTrace\codex-trace-wrapper\config.toml`。
+- `CODEX_TRACE_WRAPPER_CONFIG` 指向 `Documents\CodexTrace\bin\config.toml`。
 - viewer 端口 `127.0.0.1:45123` 正在监听。
 - ingest 端口 `127.0.0.1:45124` 正在监听。
 
@@ -104,7 +123,7 @@ cd "$env:USERPROFILE\Documents\CodexTrace"
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\stop.ps1
+.\codex-trace.ps1 stop
 ```
 
 ## 重新启用 Desktop Trace
@@ -113,7 +132,7 @@ cd "$env:USERPROFILE\Documents\CodexTrace"
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\enable-desktop-trace.ps1
+.\codex-trace.ps1 enable
 ```
 
 执行后需要完全退出并重新打开 Codex Desktop。
@@ -124,7 +143,7 @@ cd "$env:USERPROFILE\Documents\CodexTrace"
 
 ```powershell
 cd "$env:USERPROFILE\Documents\CodexTrace"
-.\disable-desktop-trace.ps1
+.\codex-trace.ps1 disable
 ```
 
 然后完全退出并重新打开 Codex Desktop。
@@ -146,7 +165,7 @@ CODEX_TRACE_WRAPPER_CONFIG
 4. 在新版解压目录执行：
 
 ```powershell
-.\install.ps1
+.\codex-trace.ps1 install
 ```
 
 5. 重新打开 Codex Desktop。
@@ -172,7 +191,7 @@ C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 如果指向 D 盘、`AppData\Local`、`Temp` 或 `Downloads`，请重新执行安装目录中的：
 
 ```powershell
-.\enable-desktop-trace.ps1
+.\codex-trace.ps1 enable
 ```
 
 ### Viewer 页面没有数据
@@ -198,13 +217,13 @@ trace ingest: 127.0.0.1:45124
 先执行：
 
 ```powershell
-.\stop.ps1
+.\codex-trace.ps1 stop
 ```
 
 如果仍被占用，执行：
 
 ```powershell
-.\status.ps1
+.\codex-trace.ps1 status
 ```
 
 查看占用进程后再处理。

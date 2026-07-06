@@ -55,6 +55,27 @@
           <span>Sessions</span>
           <span id="sessionCountLine">0</span>
         </div>
+        <section class="storagePanel" aria-label="Review storage">
+          <div class="storageHeader">
+            <div>
+              <div class="storageTitle">Storage</div>
+              <div id="storageSummary" class="storageSummary">Loading...</div>
+            </div>
+            <button id="refreshStorageBtn" type="button">Refresh</button>
+          </div>
+          <div id="storageDetail" class="storageDetailText">--</div>
+          <div class="storageControls">
+            <label>
+              Keep days
+              <input id="storageKeepDaysInput" type="number" min="0" step="1" value="7" />
+            </label>
+            <label>
+              Target MB
+              <input id="storageTargetMbInput" type="number" min="1" step="10" value="512" />
+            </label>
+            <button id="cleanupStorageBtn" type="button">Clean</button>
+          </div>
+        </section>
         <div id="sessionList" class="sessionList"></div>
         <div id="turnOverlay" class="turnOverlay" aria-hidden="true">
           <div class="turnOverlayHeader">
@@ -63,6 +84,7 @@
               <div id="turnOverlayTitle" class="turnOverlayTitle">Turns</div>
               <div id="turnOverlayMeta" class="turnOverlayMeta">Select a session.</div>
             </div>
+            <button id="turnSortBtn" class="turnSortBtn" type="button" aria-label="Toggle turn sort order">Desc</button>
           </div>
           <nav id="turnOverlayList" class="turnOverlayList" aria-label="Turn navigation"></nav>
         </div>

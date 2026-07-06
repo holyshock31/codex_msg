@@ -10,14 +10,19 @@ const state = {
   activeTab: "conversation",
   paused: false,
   status: null,
+  storage: null,
+  storageRefreshScheduled: false,
   conversationModel: null,
   conversationRefreshScheduled: false,
   renderScheduled: false,
+  turnSortDescending: true,
 };
 
 const maxDisplayedBlockChars = 16000;
 const maxStoredBlockChars = 32000;
 const maxTimelineSummaryChars = 600;
+const temporarySessionId = "__codex_trace_temporary_sessions__";
+const temporarySessionTitle = "临时会话";
 
 const els = {
   statusLine: document.querySelector("#statusLine"),
@@ -35,10 +40,17 @@ const els = {
   timelineView: document.querySelector("#timelineView"),
   sessionList: document.querySelector("#sessionList"),
   sessionCountLine: document.querySelector("#sessionCountLine"),
+  storageSummary: document.querySelector("#storageSummary"),
+  storageDetail: document.querySelector("#storageDetail"),
+  refreshStorageBtn: document.querySelector("#refreshStorageBtn"),
+  storageKeepDaysInput: document.querySelector("#storageKeepDaysInput"),
+  storageTargetMbInput: document.querySelector("#storageTargetMbInput"),
+  cleanupStorageBtn: document.querySelector("#cleanupStorageBtn"),
   turnOverlay: document.querySelector("#turnOverlay"),
   turnOverlayTitle: document.querySelector("#turnOverlayTitle"),
   turnOverlayMeta: document.querySelector("#turnOverlayMeta"),
   turnOverlayList: document.querySelector("#turnOverlayList"),
+  turnSortBtn: document.querySelector("#turnSortBtn"),
   closeTurnOverlayBtn: document.querySelector("#closeTurnOverlayBtn"),
   conversationTitle: document.querySelector("#conversationTitle"),
   conversationMeta: document.querySelector("#conversationMeta"),
@@ -90,6 +102,24 @@ function shortId(value) {
   return value.length > 12 ? value.slice(0, 8) + "..." : value;
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let scaled = value / 1024;
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  return `${scaled >= 10 ? scaled.toFixed(1) : scaled.toFixed(2)} ${units[index]}`;
+}
+
+function formatDateTime(ms) {
+  if (!ms) return "";
+  return new Date(ms).toLocaleString("zh-CN", { hour12: false });
+}
+
 function passesFilters(event) {
   const dir = els.dirFilter.value;
   const method = els.methodFilter.value.trim().toLowerCase();
@@ -128,6 +158,7 @@ function ingestEvent(event) {
 function render() {
   state.renderScheduled = false;
   renderTabs();
+  renderStorage();
   renderSessionsAndConversation();
   renderTimeline();
 }
@@ -145,6 +176,22 @@ function renderTabs() {
   els.conversationTabBtn.classList.toggle("active", conversation);
   els.timelineTabBtn.classList.toggle("active", !conversation);
   els.liveLine.textContent = state.paused ? "paused" : "live";
+}
+
+function renderStorage() {
+  const storage = state.storage || state.status?.storage;
+  if (!storage?.enabled) {
+    els.storageSummary.textContent = "disabled";
+    els.storageDetail.textContent = "Set CODEX_TRACE_STORAGE_ENABLED=true to persist review data.";
+    return;
+  }
+  const size = storage.sizeBytes ?? storage.cachedSizeBytes ?? 0;
+  const segments = storage.segmentCount ?? storage.cachedSegmentCount ?? 0;
+  const pendingBytes = storage.pendingBytes ?? 0;
+  const pendingEvents = storage.pendingEvents ?? 0;
+  const lastFlush = storage.lastFlushTs ? ` / flush ${formatDateTime(storage.lastFlushTs)}` : "";
+  els.storageSummary.textContent = `${formatBytes(size)} / ${segments} segments`;
+  els.storageDetail.textContent = `${pendingEvents} pending (${formatBytes(pendingBytes)})${lastFlush}${storage.lastError ? ` / error: ${storage.lastError}` : ""}`;
 }
 
 function renderSessionsAndConversation() {
@@ -291,6 +338,8 @@ function renderTurnOverlay(session) {
   els.turnOverlayMeta.textContent = open
     ? `${sessionThreads(session).length} threads / ${countTurns(session)} turns / ${session.blocks} blocks / ${session.events} events`
     : "Select a session to inspect turns.";
+  els.turnSortBtn.textContent = state.turnSortDescending ? "Desc" : "Asc";
+  els.turnSortBtn.title = state.turnSortDescending ? "Turn order: newest first" : "Turn order: oldest first";
   els.turnOverlayList.innerHTML = "";
   if (!open) return;
 
@@ -320,17 +369,17 @@ function renderTurnOverlay(session) {
       selectThread(threadModel.id);
     });
     fragment.appendChild(threadHeader);
-    threadModel.turns.forEach((turn, index) => {
+    numberedTurnsForNav(threadModel).forEach(({ turn, number }) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "sessionTurnRow";
       if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) button.classList.add("active");
-      button.title = `${shortId(threadModel.id)} / Turn ${index + 1} / ${shortId(turn.id)} / ${turn.blocks.length} segments`;
+      button.title = `${shortId(threadModel.id)} / Turn ${number} / ${shortId(turn.id)} / ${turn.blocks.length} segments`;
       button.dataset.threadId = threadModel.id;
       button.dataset.turnId = turn.id;
       button.innerHTML = `
-        <span class="turnRailIndex">${index + 1}</span>
-        <span class="turnRailText">${escapeHtml(turnLabel(turn, index))}</span>
+        <span class="turnRailIndex">${number}</span>
+        <span class="turnRailText">${escapeHtml(turnLabel(turn, number))}</span>
         <span class="turnRailCount">${turn.blocks.length}</span>
       `;
       button.addEventListener("click", (event) => {
@@ -385,9 +434,9 @@ function renderConversation(session) {
   const visibleThreads = activeThread ? [activeThread] : [];
   for (const threadModel of visibleThreads) {
     fragment.appendChild(threadDivider(threadModel));
-    for (const turn of threadModel.turns) {
-      fragment.appendChild(turnDivider(threadModel, turn));
-      for (const block of turn.blocks) {
+    for (const { turn, number } of numberedTurnsForDisplay(threadModel)) {
+      fragment.appendChild(turnDivider(threadModel, turn, number));
+      for (const block of blocksForDisplay(turn)) {
         fragment.appendChild(segmentCard(block, threadModel, turn));
       }
     }
@@ -415,7 +464,7 @@ function threadDivider(threadModel) {
   return el;
 }
 
-function turnDivider(threadModel, turn) {
+function turnDivider(threadModel, turn, number) {
   const el = document.createElement("div");
   el.className = "turnDivider";
   if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) el.classList.add("active");
@@ -425,16 +474,35 @@ function turnDivider(threadModel, turn) {
   const status = turn.status ? ` / ${turn.status}` : "";
   const duration = turn.durationMs != null ? ` / ${durationLabel(turn.durationMs)}` : "";
   el.innerHTML = `
-    <span>Turn ${escapeHtml(shortId(turn.id))}${status}${duration}</span>
+    <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(shortId(turn.id))}${status}${duration}</span>
   `;
   return el;
 }
 
-function turnLabel(turn, index) {
+function turnLabel(turn, number) {
   const user = turn.blocks.find((block) => block.role === "user");
-  if (user) return userFacingUserText(blockText(user)) || user.preview || user.label || `Turn ${index + 1}`;
+  if (user) return userFacingUserText(blockText(user)) || user.preview || user.label || `Turn ${number}`;
   const first = turn.blocks.find((block) => block.preview || block.label);
-  return displayPreview(first) || first?.label || `Turn ${index + 1}`;
+  return displayPreview(first) || first?.label || `Turn ${number}`;
+}
+
+function numberedTurnsForNav(threadModel) {
+  return numberedTurnsForDisplay(threadModel);
+}
+
+function numberedTurnsForDisplay(threadModel) {
+  const turns = (threadModel.turns || []).map((turn, index) => ({ turn, number: index + 1 }));
+  return state.turnSortDescending ? turns.reverse() : turns;
+}
+
+function blocksForDisplay(turn) {
+  const blocks = turn.blocks || [];
+  return state.turnSortDescending ? [...blocks].reverse() : blocks;
+}
+
+function turnNumber(threadModel, turn) {
+  const index = (threadModel.turns || []).findIndex((candidate) => candidate.id === turn.id);
+  return index >= 0 ? index + 1 : "";
 }
 
 function selectThread(threadId) {
@@ -747,6 +815,7 @@ function findTurnInSession(session, threadId, turnId) {
 }
 
 function sessionTitle(session) {
+  if (session?.kind === "temporary" || session?.id === temporarySessionId) return temporarySessionTitle;
   return session.title || session.preview || `Session ${shortId(session.id)}`;
 }
 
@@ -763,6 +832,8 @@ function agentLabel(thread) {
   if (nickname) return nickname;
   if (role) return role;
   if (thread.forkedFromId) return "side session";
+  if (thread.ephemeral === true && thread.threadSource === "system") return "system helper";
+  if (thread.ephemeral === true) return "temporary";
   return thread.parentThreadId ? "subagent" : "main agent";
 }
 
@@ -874,7 +945,7 @@ function buildConversationModel(events, allEvents = events) {
     session.threads.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
   }
   sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
-  return { sessions };
+  return { sessions: groupTemporarySessions(sessions) };
 }
 
 function getSession(map, id) {
@@ -905,11 +976,74 @@ function getThread(session, id) {
       forkedFromId: "",
       agentNickname: "",
       agentRole: "",
+      ephemeral: null,
+      threadSource: "",
     };
     session.threadsById.set(id, thread);
     session.threads.push(thread);
   }
   return session.threadsById.get(id);
+}
+
+function groupTemporarySessions(sessions) {
+  const normalSessions = [];
+  const temporarySession = {
+    id: temporarySessionId,
+    sessionId: temporarySessionId,
+    title: temporarySessionTitle,
+    cwd: "",
+    threads: [],
+    events: 0,
+    blocks: 0,
+    turnCount: 0,
+    threadCount: 0,
+    preview: "",
+    lastTs: 0,
+    source: "",
+    kind: "temporary",
+    virtual: true,
+  };
+
+  for (const session of sessions) {
+    if (!isTemporaryRootSession(session)) {
+      normalSessions.push(session);
+      continue;
+    }
+    temporarySession.threads.push(...sessionThreads(session));
+    temporarySession.events += session.events || 0;
+    temporarySession.blocks += session.blocks || 0;
+    temporarySession.turnCount += session.turnCount || countTurns(session);
+    temporarySession.lastTs = Math.max(temporarySession.lastTs || 0, session.lastTs || 0);
+    temporarySession.source = mergeSourceLabel(temporarySession.source, session.source);
+    if (!temporarySession.preview && session.preview) temporarySession.preview = session.preview;
+  }
+
+  if (temporarySession.threads.length) {
+    temporarySession.threads.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+    temporarySession.threadCount = temporarySession.threads.length;
+    temporarySession.source ||= "local";
+    normalSessions.push(temporarySession);
+  }
+
+  return normalSessions;
+}
+
+function isTemporaryRootSession(session) {
+  const rootThreads = sessionThreads(session).filter((thread) => !thread.parentThreadId && !thread.forkedFromId);
+  return rootThreads.length > 0 && rootThreads.every((thread) => isTemporaryRootThread(thread));
+}
+
+function isTemporaryRootThread(thread) {
+  if (!thread || thread.parentThreadId || thread.forkedFromId) return false;
+  if (thread.ephemeral === true) return true;
+  if (thread.ephemeral === false) return false;
+  if (thread.threadSource === "system") return true;
+  return isMetadataGapRootThread(thread);
+}
+
+function isMetadataGapRootThread(thread) {
+  const hasContent = (thread.blocks || 0) > 0 || (thread.turns || []).some((turn) => (turn.blocks || []).length > 0);
+  return !hasContent && !thread.title && !thread.threadPreview && !thread.preview && !thread.cwd;
 }
 
 function resolveDisplaySessionId(sessionMap, metadataMap, threadId, metadata, fallbackSessionId, seen = new Set()) {
@@ -947,6 +1081,8 @@ function buildThreadMetadata(events) {
         title: stringValue(event.threadName),
         preview: stringValue(event.threadPreview),
         cwd: stringValue(event.threadCwd),
+        ephemeral: booleanValue(event.threadEphemeral),
+        threadSource: stringValue(event.threadSource),
         updatedAt: numericTimestamp(event.ts_ms),
       });
     }
@@ -964,6 +1100,8 @@ function mergeRawThreadMetadata(metadata, item) {
   if (!item || typeof item !== "object") return;
   const id = stringValue(item.id || item.threadId || item.thread_id);
   if (!id) return;
+  const ephemeral = booleanValue(item.ephemeral);
+  const threadSource = stringValue(item.threadSource || item.thread_source);
   mergeThreadMetadata(metadata, {
     id,
     sessionId: stringValue(item.sessionId || item.session_id),
@@ -971,6 +1109,8 @@ function mergeRawThreadMetadata(metadata, item) {
     forkedFromId: stringValue(item.forkedFromId || item.forked_from_id),
     agentNickname: stringValue(item.agentNickname || item.agent_nickname),
     agentRole: stringValue(item.agentRole || item.agent_role),
+    ephemeral,
+    threadSource,
     title: stringValue(item.name || item.title),
     preview: stringValue(item.preview),
     cwd: stringValue(item.cwd || item.path),
@@ -979,8 +1119,27 @@ function mergeRawThreadMetadata(metadata, item) {
 }
 
 function mergeThreadMetadata(metadata, next) {
-  if (!next.id || (!next.title && !next.preview && !next.cwd && !next.sessionId)) return;
-  const current = metadata.get(next.id) || { updatedAt: 0, title: "", preview: "", cwd: "", sessionId: "", parentThreadId: "", forkedFromId: "", agentNickname: "", agentRole: "" };
+  const hasRelationMetadata =
+    (next.ephemeral !== null && next.ephemeral !== undefined) ||
+    Boolean(next.threadSource) ||
+    Boolean(next.parentThreadId) ||
+    Boolean(next.forkedFromId) ||
+    Boolean(next.agentNickname) ||
+    Boolean(next.agentRole);
+  if (!next.id || (!next.title && !next.preview && !next.cwd && !next.sessionId && !hasRelationMetadata)) return;
+  const current = metadata.get(next.id) || {
+    updatedAt: 0,
+    title: "",
+    preview: "",
+    cwd: "",
+    sessionId: "",
+    parentThreadId: "",
+    forkedFromId: "",
+    agentNickname: "",
+    agentRole: "",
+    ephemeral: null,
+    threadSource: "",
+  };
   const newer = next.updatedAt >= current.updatedAt;
   const title = chooseMetadataText(current.title, next.title, newer);
   const preview = chooseMetadataText(current.preview, next.preview, newer);
@@ -995,6 +1154,8 @@ function mergeThreadMetadata(metadata, next) {
     forkedFromId: next.forkedFromId || current.forkedFromId || "",
     agentNickname: next.agentNickname || current.agentNickname || "",
     agentRole: next.agentRole || current.agentRole || "",
+    ephemeral: next.ephemeral !== null && next.ephemeral !== undefined ? next.ephemeral : current.ephemeral,
+    threadSource: next.threadSource || current.threadSource || "",
   });
 }
 
@@ -1015,6 +1176,8 @@ function applyThreadMetadata(thread, metadata, rawSessionId = "") {
   if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
   if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
   if (metadata.agentRole) thread.agentRole = metadata.agentRole;
+  if (metadata.ephemeral !== null && metadata.ephemeral !== undefined) thread.ephemeral = metadata.ephemeral;
+  if (metadata.threadSource) thread.threadSource = metadata.threadSource;
 }
 
 function applySessionMetadata(session, thread) {
@@ -1038,6 +1201,16 @@ function stringValue(value) {
   if (typeof value !== "string") return "";
   const text = value.trim();
   return looksLikeDamagedText(text) ? "" : text;
+}
+
+function booleanValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (text === "true") return true;
+    if (text === "false") return false;
+  }
+  return null;
 }
 
 function looksLikeDamagedText(text) {
@@ -1452,7 +1625,12 @@ function closeDetail() {
 function updateStatus(status) {
   state.status = status;
   const sourceState = status?.preloadNdjson ? (status?.fileMissing ? "file-missing" : "ok") : "live-only";
-  els.statusLine.textContent = `${sourceState} | seq ${status?.lastSeq ?? 0} | buffered ${status?.bufferedEvents ?? 0} | ingested ${status?.totalIngested ?? 0} | http ${status?.clients ?? 0} | ingest ${status?.ingestClients ?? 0} | ${status?.ingest ?? ""}`;
+  const storage = status?.storage;
+  const storageLabel = storage?.enabled
+    ? `storage pending ${formatBytes(storage.pendingBytes || 0)}${storage.droppedEvents ? ` dropped ${storage.droppedEvents}` : ""}`
+    : "storage off";
+  els.statusLine.textContent = `${sourceState} | seq ${status?.lastSeq ?? 0} | buffered ${status?.bufferedEvents ?? 0} | ingested ${status?.totalIngested ?? 0} | restored ${status?.totalRestored ?? 0} | ${storageLabel} | http ${status?.clients ?? 0} | ingest ${status?.ingestClients ?? 0} | ${status?.ingest ?? ""}`;
+  scheduleStorageRefresh(false);
 }
 
 function addEvent(event) {
@@ -1481,10 +1659,74 @@ function truncateInline(value, maxChars) {
 
 async function loadInitial() {
   const limit = Math.max(5000, Number(els.limitInput.value || "1000"));
-  const [eventsRes] = await Promise.all([fetch(`/api/events?limit=${encodeURIComponent(limit)}&compact=1`), refreshConversationModel()]);
+  const [eventsRes] = await Promise.all([fetch(`/api/events?limit=${encodeURIComponent(limit)}&compact=1`), refreshConversationModel(), refreshStorage(true)]);
   state.nextViewId = 1;
   state.events = (await eventsRes.json()).map(ingestEvent);
   render();
+}
+
+async function refreshStorage(force = false) {
+  try {
+    const res = await fetch(`/api/storage${force ? "?force=1" : ""}`);
+    if (!res.ok) return;
+    state.storage = await res.json();
+    renderStorage();
+  } catch {
+    state.storage = state.storage || null;
+  }
+}
+
+function scheduleStorageRefresh(force = false) {
+  if (force) {
+    void refreshStorage(true);
+    return;
+  }
+  if (state.storageRefreshScheduled) return;
+  state.storageRefreshScheduled = true;
+  setTimeout(async () => {
+    state.storageRefreshScheduled = false;
+    await refreshStorage(false);
+  }, 30000);
+}
+
+async function cleanupStorage() {
+  const keepDays = Number(els.storageKeepDaysInput.value || "0");
+  const targetMb = Number(els.storageTargetMbInput.value || "0");
+  const targetBytes = targetMb > 0 ? Math.floor(targetMb * 1024 * 1024) : null;
+  const payload = {
+    keepDays: Number.isFinite(keepDays) ? keepDays : null,
+    targetBytes,
+    dryRun: true,
+  };
+  els.cleanupStorageBtn.disabled = true;
+  try {
+    const previewRes = await fetch("/api/storage/cleanup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const preview = await previewRes.json();
+    if (!previewRes.ok) throw new Error(preview.error || "cleanup preview failed");
+    if (!preview.deletedSegments) {
+      els.storageDetail.textContent = "No matching old storage segments.";
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${preview.deletedSegments} segments (${formatBytes(preview.deletedBytes)})?`);
+    if (!confirmed) return;
+    const cleanupRes = await fetch("/api/storage/cleanup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...payload, dryRun: false }),
+    });
+    const cleanup = await cleanupRes.json();
+    if (!cleanupRes.ok) throw new Error(cleanup.error || "cleanup failed");
+    els.storageDetail.textContent = `Deleted ${cleanup.deletedSegments} segments (${formatBytes(cleanup.deletedBytes)}).`;
+    await refreshStorage(true);
+  } catch (error) {
+    els.storageDetail.textContent = `Cleanup failed: ${error.message}`;
+  } finally {
+    els.cleanupStorageBtn.disabled = false;
+  }
 }
 
 async function refreshConversationModel() {
@@ -1552,7 +1794,17 @@ els.clearBtn.addEventListener("click", () => {
   closeDetail();
 });
 
+els.refreshStorageBtn.addEventListener("click", () => {
+  void refreshStorage(true);
+});
+els.cleanupStorageBtn.addEventListener("click", () => {
+  void cleanupStorage();
+});
 els.closeDetailBtn.addEventListener("click", closeDetail);
+els.turnSortBtn.addEventListener("click", () => {
+  state.turnSortDescending = !state.turnSortDescending;
+  render();
+});
 els.closeSegmentDetailBtn.addEventListener("click", () => {
   state.selectedSegmentKey = "";
   renderSegmentsActiveState();

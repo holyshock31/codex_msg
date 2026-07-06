@@ -59,7 +59,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 }
 
 $wrapperPath = Join-Path $InstallRoot "bin\codex-trace-wrapper.exe"
-$configPath = Join-Path $InstallRoot "codex-trace-wrapper\config.toml"
+$configPath = Join-Path $InstallRoot "bin\config.toml"
 
 if (-not (Test-Path -Path $wrapperPath -PathType Leaf)) {
   throw "Wrapper executable not found: $wrapperPath"

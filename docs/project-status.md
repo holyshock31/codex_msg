@@ -98,14 +98,19 @@ Conversation Store：
 
 这样长流式输出不会用大量 delta event 挤掉对话展示内容。
 
-### 5. 当前暂不落盘 Conversation Store
+### 5. Review Store 低频分段持久化
 
-当前 Conversation Store 在内存中。viewer 重启后监测页历史会丢，但 Codex Desktop 会话本身不受影响。
+viewer 默认启用独立 Review Store，用于解决内存 ring buffer 滚动后旧 side chat / subagent 记录无法回看的问题。
 
-后续正式化建议：
+设计选择：
 
-- SQLite WAL：适合查询、索引、增量更新。
-- NDJSON：适合简单 append 和排查，但查询、更新、压缩较弱。
+- 不复用 Codex 自身 rollout/state DB，也不写 SQLite。Codex 的 rollout 是会话事实源，viewer 需要保留 app-server 原始协议流、方向、请求 id、parse error、transport 等诊断字段。
+- 热路径只写内存队列，不在每条事件到达时同步写磁盘。
+- 后台批量 append 到 `.ndjson` 分段：默认 `5s`、`500` 条事件或 `512KB` 任一条件触发一次写入。
+- 分段默认 `32MB` 或 `1h` 滚动。
+- 启动时默认只恢复最近 `64MB` / `20000` 条事件，避免全量扫描历史。
+- Review 页左侧 `Storage` 区显示占用、分段数、pending 队列和最近 flush 时间。
+- 清理旧存储时删除整个旧分段，不重写历史文件，避免清理造成写放大。
 
 ## 当前实现进展
 
@@ -115,7 +120,7 @@ Conversation Store：
 - wrapper 支持 daemon sink：`tcp://127.0.0.1:45124`。
 - wrapper 支持 fallback NDJSON 开关，目前默认关闭。
 - viewer Node 服务可接收 TCP ingest。
-- viewer 提供 `GET /api/status`、`GET /api/events`、`GET /api/conversations`、`GET /events`。
+- viewer 提供 `GET /api/status`、`GET /api/events`、`GET /api/conversations`、`GET /api/storage`、`POST /api/storage/cleanup`、`GET /events`。
 - 前端 Conversation 视图：
   - 左侧 session 列表。
   - 左侧 session 内 turn 覆盖层导航。
@@ -124,6 +129,10 @@ Conversation Store：
   - Full info 已改为详情按钮弹窗。
 - 前端 Timeline 视图保留原始事件列表。
 - Conversation Store 已实现 segment 聚合和流式 delta 合并。
+- Review Store 已实现低频分段持久化、启动恢复和旧分段清理。
+- Review 页已显示存储占用，并支持按保留天数/目标大小清理旧存储。
+- 日常启停已收敛到根目录 `codex-trace.ps1`；`install/setup` 负责拷贝文件、设置 `CODEX_CLI_PATH` 并启动 viewer，`start` 只负责启动 viewer；Review Store 随 viewer 启停，不需要单独启动 storage。
+- wrapper 已支持 `[rewrite].enable_experimental_raw_events`，开启后会注入 `initialize.capabilities.experimentalApi=true` 和 `thread/start.experimentalRawEvents=true`，用于捕获 `rawResponseItem/completed`。
 - `turn/start` 生命周期事件已从 Conversation 展示层过滤。
 - 左侧 turn title 已支持提取真实用户输入。
 - 右侧正文和 detail 保留原始完整内容。
@@ -137,6 +146,7 @@ Conversation Store：
 
 - `node --check codex-trace-viewer\server.js`
 - `node --check codex-trace-viewer\public\app.js`
+- `codex-trace-viewer\scripts\test-storage.ps1`
 - `go test ./...` in `codex-trace-wrapper`
 
 ## 重要注意事项
@@ -151,19 +161,19 @@ Conversation Store：
 - `userMessage` item 才是 Conversation 里的用户消息。
 - 左侧 turn title 可以精简。
 - 右侧 conversation 正文、Segment detail、Full info 不精简。
-- 受管理环境使用时，wrapper exe 默认安装到 `C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe`，`CODEX_CLI_PATH` 指向该路径。不要直接指向 D 盘开发目录、`AppData\Local`、`Temp` 或 `Downloads`，这些路径可能被终端安全软件拦截并导致 Codex Desktop 报 `spawn EPERM`。
+- 受管理环境使用时，wrapper exe 默认安装到 `C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe`，运行时配置安装到同目录 `C:\Users\<user>\Documents\CodexTrace\bin\config.toml`。`CODEX_CLI_PATH` 和 `CODEX_TRACE_WRAPPER_CONFIG` 分别指向这两个路径。不要直接指向 D 盘开发目录、`AppData\Local`、`Temp` 或 `Downloads`，这些路径可能被终端安全软件拦截并导致 Codex Desktop 报 `spawn EPERM`。
 
 ## 当前限制
 
-- viewer 重启后内存历史丢失。
+- viewer 重启后会从 Review Store 恢复最近窗口；超过 `CODEX_TRACE_STORAGE_PRELOAD_BYTES` / `CODEX_TRACE_STORAGE_PRELOAD_EVENTS` 的旧数据需要后续分页读取能力。
 - 当前旧 viewer 进程如果仍在运行，会占用 `45123/45124`，新目录 viewer 启动前需要先停止旧 viewer。
 - 如果 Codex 内部工具环境也启动 `codex app-server --listen stdio://`，可能出现额外 wrapper 进程；这不是 Desktop 主链路。
 - `docs/codex-desktop-trace-viewer-plan.md` 是早期方案记录，部分环境读取时可能显示乱码；后续以本文件、根 README 和 notes 文件为准。
 
 ## 建议下一步
 
-1. 将 `Conversation Store` 落盘到 SQLite 或 NDJSON。
+1. 给 Review Store 增加按 session/thread/turn 的分页读取接口，避免启动恢复窗口过大。
 2. 在 wrapper 里增加可选过滤，忽略 `--listen stdio://` 这类工具链路。
 3. 在 viewer 顶部显示数据来源与丢弃状态，例如 raw ring 已丢弃多少事件。
 4. 给 `/api/conversations` 增加按 session/turn 拉取的接口，避免全量返回过大。
-5. 补充一组端到端 smoke：启动 fake app-server、发送 turn/user/tool/delta、断言 conversation 聚合结果。
+5. 补充更完整的端到端 smoke：启动 fake app-server、发送 turn/user/tool/delta、断言 conversation 聚合结果。

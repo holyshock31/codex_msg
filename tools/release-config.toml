@@ -5,3 +5,7 @@
 daemon_url = "tcp://127.0.0.1:45124"
 fallback_ndjson = false
 queue_capacity = 10000
+
+[rewrite]
+# Disabled by default because it rewrites Desktop -> app-server requests.
+enable_experimental_raw_events = false

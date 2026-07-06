@@ -244,9 +244,87 @@ h1 {
 }
 
 .sessionList {
-  height: calc(100% - 44px);
+  height: calc(100% - 44px - 142px);
   overflow: auto;
   padding: 8px;
+}
+
+.storagePanel {
+  display: grid;
+  gap: 8px;
+  min-height: 142px;
+  padding: 9px 10px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.storageHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.storageTitle {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.storageSummary,
+.storageDetailText {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storageDetailText {
+  min-height: 15px;
+}
+
+.storageControls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 7px;
+}
+
+.storageControls label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.storageControls input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 6px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.storageHeader button,
+.storageControls button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: var(--muted);
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.storageHeader button:hover,
+.storageControls button:hover {
+  border-color: rgba(15, 118, 110, 0.36);
+  color: var(--accent);
 }
 
 .sessionRow {
@@ -304,7 +382,7 @@ h1 {
 
 .turnOverlayHeader {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-height: 52px;
@@ -324,6 +402,23 @@ h1 {
 }
 
 .turnOverlayBack:hover {
+  border-color: rgba(15, 118, 110, 0.36);
+  color: var(--accent);
+}
+
+.turnSortBtn {
+  min-width: 48px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--muted);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+}
+
+.turnSortBtn:hover {
   border-color: rgba(15, 118, 110, 0.36);
   color: var(--accent);
 }
@@ -552,6 +647,11 @@ h1 {
   background: #ffffff;
   padding: 4px 9px;
   white-space: nowrap;
+}
+
+.turnDivider strong {
+  color: var(--text);
+  font-weight: 700;
 }
 
 .turnDivider.active span {
@@ -864,8 +964,9 @@ h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
+  min-width: 22px;
   height: 20px;
+  padding: 0 5px;
   border-radius: 999px;
   background: #edf2f7;
   color: var(--muted);

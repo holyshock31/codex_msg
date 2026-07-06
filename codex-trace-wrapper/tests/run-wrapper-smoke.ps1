@@ -32,12 +32,16 @@ trace_dir = "$($traceDir -replace '\\', '\\')"
 daemon_url = "tcp://127.0.0.1:$daemonPort"
 fallback_ndjson = false
 queue_capacity = 100
+reasoning_summary_override = "detailed"
+
+[rewrite]
+enable_experimental_raw_events = true
 "@
 
 try {
   [System.IO.File]::WriteAllText($config, $configText, [System.Text.UTF8Encoding]::new($false))
 
-  $inputText = '{"id":1,"method":"thread/list"}' + "`n" + '{"id":2,"method":"ping"}' + "`n"
+  $inputText = '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"smoke","version":"1.0.0"},"capabilities":{}}}' + "`n" + '{"id":2,"method":"thread/list"}' + "`n" + '{"id":3,"method":"turn/start","params":{"threadId":"test-thread","summary":"none","input":[]}}' + "`n" + '{"id":4,"method":"ping"}' + "`n"
 
   $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
   $startInfo.FileName = $wrapper
@@ -74,6 +78,15 @@ try {
 
   if ($stdout -notmatch '"ok":true') {
     throw "Wrapper stdout did not contain fake server responses. Output: $stdout"
+  }
+  if ($stdout -notmatch '"method":"turn/start"' -or $stdout -notmatch '"summary":"detailed"') {
+    throw "Wrapper did not rewrite turn/start summary to detailed. Output: $stdout"
+  }
+  if ($stdout -notmatch '"experimentalApi":true') {
+    throw "Wrapper did not inject initialize capabilities.experimentalApi=true. Output: $stdout"
+  }
+  if ($stdout -notmatch '"experimentalRawEvents":true') {
+    throw "Wrapper did not inject turn/start experimentalRawEvents=true. Output: $stdout"
   }
 
   $deadline = [DateTime]::UtcNow.AddSeconds(5)
@@ -117,6 +130,37 @@ try {
   }
   if ($contents -notmatch 'server_to_client') {
     throw "Trace does not contain server_to_client events"
+  }
+  $sawRewrittenTrace = $false
+  $sawRawEventsInitialize = $false
+  $sawRawEventsTurnStart = $false
+  foreach ($line in ($contents -split "`r?`n")) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+    $event = $line | ConvertFrom-Json
+    if ($event.dir -ne "client_to_server") {
+      continue
+    }
+    $raw = $event.raw | ConvertFrom-Json
+    if ($raw.method -eq "initialize" -and $raw.params.capabilities.experimentalApi -eq $true) {
+      $sawRawEventsInitialize = $true
+    }
+    if ($raw.method -eq "turn/start" -and $raw.params.summary -eq "detailed") {
+      $sawRewrittenTrace = $true
+    }
+    if ($raw.method -eq "turn/start" -and $raw.params.experimentalRawEvents -eq $true) {
+      $sawRawEventsTurnStart = $true
+    }
+  }
+  if (-not $sawRewrittenTrace) {
+    throw "Trace does not contain rewritten turn/start summary. Contents: $contents"
+  }
+  if (-not $sawRawEventsInitialize) {
+    throw "Trace does not contain rewritten initialize experimentalApi=true. Contents: $contents"
+  }
+  if (-not $sawRawEventsTurnStart) {
+    throw "Trace does not contain rewritten turn/start experimentalRawEvents=true. Contents: $contents"
   }
 
   $events = Join-Path $traceDir "events.ndjson"

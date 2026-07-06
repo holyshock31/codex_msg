@@ -20,21 +20,25 @@ import (
 )
 
 const (
-	configEnv         = "CODEX_TRACE_WRAPPER_CONFIG"
-	realCodexEnv      = "CODEX_TRACE_REAL_CODEX"
-	traceDirEnv       = "CODEX_TRACE_DIR"
-	daemonURLEnv      = "CODEX_TRACE_DAEMON_URL"
-	fallbackNDJSONEnv = "CODEX_TRACE_FALLBACK_NDJSON"
-	queueCapacityEnv  = "CODEX_TRACE_QUEUE_CAPACITY"
-	defaultQueueCap   = 10000
+	configEnv          = "CODEX_TRACE_WRAPPER_CONFIG"
+	realCodexEnv       = "CODEX_TRACE_REAL_CODEX"
+	traceDirEnv        = "CODEX_TRACE_DIR"
+	daemonURLEnv       = "CODEX_TRACE_DAEMON_URL"
+	fallbackNDJSONEnv  = "CODEX_TRACE_FALLBACK_NDJSON"
+	queueCapacityEnv   = "CODEX_TRACE_QUEUE_CAPACITY"
+	summaryOverrideEnv = "CODEX_TRACE_REASONING_SUMMARY_OVERRIDE"
+	rawEventsEnv       = "CODEX_TRACE_ENABLE_EXPERIMENTAL_RAW_EVENTS"
+	defaultQueueCap    = 10000
 )
 
 type config struct {
-	RealCodex      string
-	TraceDir       string
-	DaemonURL      string
-	FallbackNDJSON bool
-	QueueCapacity  int
+	RealCodex                   string
+	TraceDir                    string
+	DaemonURL                   string
+	FallbackNDJSON              bool
+	QueueCapacity               int
+	ReasoningSummaryOverride    string
+	EnableExperimentalRawEvents bool
 }
 
 type traceEvent struct {
@@ -62,6 +66,8 @@ func main() {
 		daemonURLEnv:             os.Getenv(daemonURLEnv),
 		fallbackNDJSONEnv:        os.Getenv(fallbackNDJSONEnv),
 		queueCapacityEnv:         os.Getenv(queueCapacityEnv),
+		summaryOverrideEnv:       os.Getenv(summaryOverrideEnv),
+		rawEventsEnv:             os.Getenv(rawEventsEnv),
 		"LOCALAPPDATA":           os.Getenv("LOCALAPPDATA"),
 		"USERPROFILE":            os.Getenv("USERPROFILE"),
 		"TEMP":                   os.Getenv("TEMP"),
@@ -111,11 +117,13 @@ func run(bootstrap *bootstrapLog) (int, error) {
 		return 1, err
 	}
 	bootstrap.Log("load_config_done", map[string]string{
-		"real_codex":      cfg.RealCodex,
-		"trace_dir":       cfg.TraceDir,
-		"daemon_url":      cfg.DaemonURL,
-		"fallback_ndjson": strconv.FormatBool(cfg.FallbackNDJSON),
-		"queue_capacity":  strconv.Itoa(cfg.QueueCapacity),
+		"real_codex":       cfg.RealCodex,
+		"trace_dir":        cfg.TraceDir,
+		"daemon_url":       cfg.DaemonURL,
+		"fallback_ndjson":  strconv.FormatBool(cfg.FallbackNDJSON),
+		"queue_capacity":   strconv.Itoa(cfg.QueueCapacity),
+		"summary_override": cfg.ReasoningSummaryOverride,
+		"raw_events":       strconv.FormatBool(cfg.EnableExperimentalRawEvents),
 	})
 	bootstrap.Log("mkdir_trace_dir_start", map[string]string{"trace_dir": cfg.TraceDir})
 	if err := os.MkdirAll(cfg.TraceDir, 0o700); err != nil {
@@ -128,7 +136,7 @@ func run(bootstrap *bootstrapLog) (int, error) {
 	bootstrap.Log("wrapper_log_open_start", map[string]string{"path": wrapperLogPath})
 	logFile, err := openAppend(wrapperLogPath)
 	if err == nil {
-		_, _ = fmt.Fprintf(logFile, "%d starting real_codex=%s trace_dir=%s daemon_url=%s fallback_ndjson=%t queue_capacity=%d\n", nowMs(), cfg.RealCodex, cfg.TraceDir, cfg.DaemonURL, cfg.FallbackNDJSON, cfg.QueueCapacity)
+		_, _ = fmt.Fprintf(logFile, "%d starting real_codex=%s trace_dir=%s daemon_url=%s fallback_ndjson=%t queue_capacity=%d summary_override=%s raw_events=%t\n", nowMs(), cfg.RealCodex, cfg.TraceDir, cfg.DaemonURL, cfg.FallbackNDJSON, cfg.QueueCapacity, cfg.ReasoningSummaryOverride, cfg.EnableExperimentalRawEvents)
 		_ = logFile.Close()
 		bootstrap.Log("wrapper_log_open_done", map[string]string{"path": wrapperLogPath})
 	} else {
@@ -186,16 +194,16 @@ func run(bootstrap *bootstrapLog) (int, error) {
 	pipeWG.Add(3)
 	go func() {
 		defer pipeWG.Done()
-		_ = pipeLines(os.Stdin, childStdin, "client_to_server", pid, &seq, events)
+		_ = pipeLines(os.Stdin, childStdin, "client_to_server", pid, &seq, events, cfg)
 		_ = childStdin.Close()
 	}()
 	go func() {
 		defer pipeWG.Done()
-		_ = pipeLines(childStdout, os.Stdout, "server_to_client", pid, &seq, events)
+		_ = pipeLines(childStdout, os.Stdout, "server_to_client", pid, &seq, events, cfg)
 	}()
 	go func() {
 		defer pipeWG.Done()
-		_ = pipeLines(childStderr, os.Stderr, "server_stderr", pid, &seq, events)
+		_ = pipeLines(childStderr, os.Stderr, "server_stderr", pid, &seq, events, cfg)
 	}()
 
 	bootstrap.Log("real_codex_wait_start", map[string]string{"child_pid": strconv.Itoa(cmd.Process.Pid)})
@@ -354,6 +362,12 @@ func loadConfig() (config, error) {
 			cfg.QueueCapacity = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv(summaryOverrideEnv)); value != "" {
+		cfg.ReasoningSummaryOverride = normalizeReasoningSummaryOverride(value)
+	}
+	if value := strings.TrimSpace(os.Getenv(rawEventsEnv)); value != "" {
+		cfg.EnableExperimentalRawEvents = parseBool(value)
+	}
 
 	if cfg.RealCodex == "" {
 		discovered, err := discoverRealCodex()
@@ -380,6 +394,9 @@ func loadConfig() (config, error) {
 	if cfg.QueueCapacity <= 0 {
 		cfg.QueueCapacity = defaultQueueCap
 	}
+	if cfg.ReasoningSummaryOverride != "" && !validReasoningSummaryOverride(cfg.ReasoningSummaryOverride) {
+		return cfg, fmt.Errorf("invalid reasoning_summary_override %q; expected auto, concise, detailed, or none", cfg.ReasoningSummaryOverride)
+	}
 	return cfg, nil
 }
 
@@ -397,6 +414,12 @@ func mergeConfig(base, override config) config {
 	if override.QueueCapacity > 0 {
 		base.QueueCapacity = override.QueueCapacity
 	}
+	if override.ReasoningSummaryOverride != "" {
+		base.ReasoningSummaryOverride = override.ReasoningSummaryOverride
+	}
+	if override.EnableExperimentalRawEvents {
+		base.EnableExperimentalRawEvents = true
+	}
 	return base
 }
 
@@ -407,9 +430,14 @@ func parseConfig(path string) (config, error) {
 		return cfg, fmt.Errorf("read config %s: %w", path, err)
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(content))
+	section := ""
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
@@ -418,6 +446,9 @@ func parseConfig(path string) (config, error) {
 		}
 		key = strings.TrimSpace(key)
 		key = strings.TrimPrefix(key, "\uFEFF")
+		if section != "" && !strings.Contains(key, ".") {
+			key = section + "." + key
+		}
 		value = strings.TrimSpace(value)
 		value = strings.Trim(value, `"'`)
 		value = strings.ReplaceAll(value, `\\`, `\`)
@@ -435,6 +466,10 @@ func parseConfig(path string) (config, error) {
 			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
 				cfg.QueueCapacity = parsed
 			}
+		case "reasoning_summary_override":
+			cfg.ReasoningSummaryOverride = normalizeReasoningSummaryOverride(value)
+		case "rewrite.enable_experimental_raw_events", "enable_experimental_raw_events":
+			cfg.EnableExperimentalRawEvents = parseBool(value)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -487,12 +522,13 @@ func discoverRealCodex() (string, error) {
 	return candidates[len(candidates)-1].path, nil
 }
 
-func pipeLines(r io.Reader, w io.Writer, dir string, pid int, seq *atomic.Uint64, events chan<- traceEvent) error {
+func pipeLines(r io.Reader, w io.Writer, dir string, pid int, seq *atomic.Uint64, events chan<- traceEvent, cfg config) error {
 	reader := bufio.NewReader(r)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			if _, writeErr := w.Write(line); writeErr != nil {
+			outLine := maybeRewriteClientToServerLine(line, dir, cfg)
+			if _, writeErr := w.Write(outLine); writeErr != nil {
 				return writeErr
 			}
 			if flusher, ok := w.(interface{ Flush() error }); ok {
@@ -503,7 +539,7 @@ func pipeLines(r io.Reader, w io.Writer, dir string, pid int, seq *atomic.Uint64
 				TsMs: nowMs(),
 				Pid:  pid,
 				Dir:  dir,
-				Raw:  strings.TrimRight(string(line), "\r\n"),
+				Raw:  strings.TrimRight(string(outLine), "\r\n"),
 			})
 		}
 		if err != nil {
@@ -512,6 +548,93 @@ func pipeLines(r io.Reader, w io.Writer, dir string, pid int, seq *atomic.Uint64
 			}
 			return err
 		}
+	}
+}
+
+func maybeRewriteClientToServerLine(line []byte, dir string, cfg config) []byte {
+	if dir != "client_to_server" || (cfg.ReasoningSummaryOverride == "" && !cfg.EnableExperimentalRawEvents) {
+		return line
+	}
+	return rewriteClientToServerLine(line, cfg)
+}
+
+func rewriteClientToServerLine(line []byte, cfg config) []byte {
+	content, eol := splitLineEnding(line)
+	if len(bytes.TrimSpace(content)) == 0 {
+		return line
+	}
+
+	var message map[string]any
+	if err := json.Unmarshal(content, &message); err != nil {
+		return line
+	}
+	method, _ := message["method"].(string)
+	changed := false
+
+	if method == "initialize" && cfg.EnableExperimentalRawEvents {
+		params, _ := message["params"].(map[string]any)
+		if params == nil {
+			params = map[string]any{}
+			message["params"] = params
+		}
+		capabilities, _ := params["capabilities"].(map[string]any)
+		if capabilities == nil {
+			capabilities = map[string]any{}
+			params["capabilities"] = capabilities
+		}
+		if capabilities["experimentalApi"] != true {
+			capabilities["experimentalApi"] = true
+			changed = true
+		}
+	}
+
+	if method == "turn/start" {
+		params, _ := message["params"].(map[string]any)
+		if params == nil {
+			params = map[string]any{}
+			message["params"] = params
+		}
+		if cfg.ReasoningSummaryOverride != "" && params["summary"] != cfg.ReasoningSummaryOverride {
+			params["summary"] = cfg.ReasoningSummaryOverride
+			changed = true
+		}
+		if cfg.EnableExperimentalRawEvents && params["experimentalRawEvents"] != true {
+			params["experimentalRawEvents"] = true
+			changed = true
+		}
+	}
+
+	if !changed {
+		return line
+	}
+
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return line
+	}
+	return append(encoded, eol...)
+}
+
+func splitLineEnding(line []byte) ([]byte, []byte) {
+	if bytes.HasSuffix(line, []byte("\r\n")) {
+		return line[:len(line)-2], []byte("\r\n")
+	}
+	if bytes.HasSuffix(line, []byte("\n")) {
+		return line[:len(line)-1], []byte("\n")
+	}
+	return line, nil
+}
+
+func normalizeReasoningSummaryOverride(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func validReasoningSummaryOverride(value string) bool {
+	switch normalizeReasoningSummaryOverride(value) {
+	case "auto", "concise", "detailed", "none":
+		return true
+	default:
+		return false
 	}
 }
 

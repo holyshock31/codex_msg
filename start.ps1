@@ -1,2 +1,2 @@
 $ErrorActionPreference = "Stop"
-& (Join-Path $PSScriptRoot "scripts\start-viewer.ps1") @args
+& (Join-Path $PSScriptRoot "codex-trace.ps1") start @args

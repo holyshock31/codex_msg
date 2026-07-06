@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,23 @@ const MAX_CONVERSATION_SESSIONS = Number(process.env.CODEX_TRACE_CONVERSATION_MA
 const MAX_SEGMENT_CONTENT_CHARS = Number(process.env.CODEX_TRACE_SEGMENT_MAX_CHARS || String(1024 * 1024));
 const RAW_SAMPLE_HEAD_EVENTS = Number(process.env.CODEX_TRACE_SEGMENT_RAW_HEAD_EVENTS || "3");
 const RAW_SAMPLE_TAIL_EVENTS = Number(process.env.CODEX_TRACE_SEGMENT_RAW_TAIL_EVENTS || "5");
+const STORAGE_ENABLED = (process.env.CODEX_TRACE_STORAGE_ENABLED || "true").toLowerCase() !== "false";
+const STORAGE_DIR =
+  process.env.CODEX_TRACE_STORAGE_DIR ||
+  path.join(process.env.USERPROFILE || process.env.HOME || ".", ".codex-trace", "review-store");
+const STORAGE_SEGMENTS_DIR = path.join(STORAGE_DIR, "segments");
+const STORAGE_FLUSH_INTERVAL_MS = Number(process.env.CODEX_TRACE_STORAGE_FLUSH_MS || "5000");
+const STORAGE_BATCH_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_BATCH_EVENTS || "500");
+const STORAGE_BATCH_BYTES = Number(process.env.CODEX_TRACE_STORAGE_BATCH_BYTES || String(512 * 1024));
+const STORAGE_PENDING_MAX_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PENDING_MAX_BYTES || String(64 * 1024 * 1024));
+const STORAGE_SEGMENT_MAX_BYTES = Number(process.env.CODEX_TRACE_STORAGE_SEGMENT_MAX_BYTES || String(32 * 1024 * 1024));
+const STORAGE_SEGMENT_ROLL_MS = Number(process.env.CODEX_TRACE_STORAGE_SEGMENT_ROLL_MS || String(60 * 60 * 1000));
+const STORAGE_PRELOAD_ENABLED = (process.env.CODEX_TRACE_STORAGE_PRELOAD || "true").toLowerCase() !== "false";
+const STORAGE_PRELOAD_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_BYTES || String(512 * 1024 * 1024));
+const STORAGE_PRELOAD_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_EVENTS || "100000");
+const STORAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_STORAGE_SCAN_CACHE_MS || "5000");
+const TEMPORARY_SESSION_ID = "__codex_trace_temporary_sessions__";
+const TEMPORARY_SESSION_TITLE = "临时会话";
 
 const publicDir = path.join(__dirname, "public");
 const clients = new Set();
@@ -40,6 +58,7 @@ let fileMissing = false;
 let totalParsed = 0;
 let totalParseErrors = 0;
 let totalIngested = 0;
+let totalRestored = 0;
 let conversationVersion = 0;
 let ingestClients = 0;
 let sessionIndexLoaded = false;
@@ -47,16 +66,40 @@ let sessionIndexLastMtimeMs = 0;
 let sessionIndexRecords = 0;
 let watcher = null;
 let readInProgress = false;
+const storageState = {
+  pending: [],
+  pendingBytes: 0,
+  flushTimer: null,
+  writing: false,
+  activePath: "",
+  activeBytes: 0,
+  activeStartedAt: 0,
+  writtenEvents: 0,
+  writtenBytes: 0,
+  droppedEvents: 0,
+  lastFlushTs: 0,
+  lastError: "",
+  writeDeltaSinceScan: 0,
+  scanCache: null,
+};
 
-function pushEvent(event) {
+function pushEvent(event, options = {}) {
+  const persist = options.persist !== false;
+  const broadcastEvent = options.broadcast !== false;
+  const countParsed = options.countParsed !== false;
   updateThreadMetadataFromEvent(event);
   updateConversationStore(event);
   ring.push(event);
   if (ring.length > MAX_EVENTS) ring.shift();
-  totalParsed += 1;
-  if (event.parseError || event.rawParseError) totalParseErrors += 1;
+  if (persist) enqueueStorageEvent(event);
+  if (countParsed) {
+    totalParsed += 1;
+    if (event.parseError || event.rawParseError) totalParseErrors += 1;
+  } else {
+    totalRestored += 1;
+  }
   lastSeq = Math.max(lastSeq, Number(event.seq) || 0);
-  broadcast("event", event);
+  if (broadcastEvent) broadcast("event", event);
 }
 
 function pushOuterEvent(outer) {
@@ -65,6 +108,125 @@ function pushOuterEvent(outer) {
     totalIngested += 1;
     pushEvent(event);
   }
+}
+
+function enqueueStorageEvent(event) {
+  if (!STORAGE_ENABLED) return;
+  const storageEvent = storageEventFor(event);
+  if (!storageEvent) return;
+  let line = "";
+  try {
+    line = `${JSON.stringify(storageEvent)}\n`;
+  } catch (error) {
+    storageState.lastError = `serialize failed: ${error.message}`;
+    return;
+  }
+  const bytes = Buffer.byteLength(line);
+  storageState.pending.push({ line, bytes });
+  storageState.pendingBytes += bytes;
+
+  while (storageState.pendingBytes > STORAGE_PENDING_MAX_BYTES && storageState.pending.length > 1) {
+    dropOldestPendingStorageEvent();
+  }
+
+  if (storageState.pending.length >= STORAGE_BATCH_EVENTS || storageState.pendingBytes >= STORAGE_BATCH_BYTES) {
+    scheduleStorageFlush(0);
+  } else {
+    scheduleStorageFlush(STORAGE_FLUSH_INTERVAL_MS);
+  }
+}
+
+function storageEventFor(event) {
+  if (isStreamingDeltaMethod(event.method)) return null;
+  return event;
+}
+
+function isStreamingDeltaMethod(method) {
+  return (
+    method === "item/agentMessage/delta" ||
+    method === "item/commandExecution/outputDelta" ||
+    method === "item/reasoning/summaryTextDelta" ||
+    method === "item/reasoning/textDelta" ||
+    method === "item/plan/delta"
+  );
+}
+
+function scheduleStorageFlush(delayMs) {
+  if (!STORAGE_ENABLED || storageState.writing) return;
+  if (storageState.flushTimer && delayMs > 0) return;
+  if (storageState.flushTimer) {
+    clearTimeout(storageState.flushTimer);
+    storageState.flushTimer = null;
+  }
+  storageState.flushTimer = setTimeout(() => {
+    storageState.flushTimer = null;
+    void flushStoragePending();
+  }, delayMs);
+  storageState.flushTimer.unref?.();
+}
+
+async function flushStoragePending() {
+  if (!STORAGE_ENABLED || storageState.writing || storageState.pending.length === 0) return;
+  storageState.writing = true;
+  const batch = storageState.pending;
+  const batchBytes = storageState.pendingBytes;
+  storageState.pending = [];
+  storageState.pendingBytes = 0;
+  try {
+    await fsp.mkdir(STORAGE_SEGMENTS_DIR, { recursive: true });
+    const segmentPath = await ensureStorageSegment(batchBytes);
+    const text = batch.map((entry) => entry.line).join("");
+    await fsp.appendFile(segmentPath, text, "utf8");
+    storageState.activeBytes += batchBytes;
+    storageState.writtenBytes += batchBytes;
+    storageState.writtenEvents += batch.length;
+    storageState.writeDeltaSinceScan += batchBytes;
+    storageState.lastFlushTs = Date.now();
+    storageState.lastError = "";
+  } catch (error) {
+    storageState.lastError = error.message;
+    storageState.pending = batch.concat(storageState.pending);
+    storageState.pendingBytes += batchBytes;
+    trimStoragePendingQueue();
+  } finally {
+    storageState.writing = false;
+    if (storageState.pending.length) scheduleStorageFlush(STORAGE_FLUSH_INTERVAL_MS);
+  }
+}
+
+function trimStoragePendingQueue() {
+  while (storageState.pendingBytes > STORAGE_PENDING_MAX_BYTES && storageState.pending.length > 1) {
+    dropOldestPendingStorageEvent();
+  }
+}
+
+function dropOldestPendingStorageEvent() {
+  const dropped = storageState.pending.shift();
+  if (!dropped) return;
+  storageState.pendingBytes -= dropped.bytes;
+  storageState.droppedEvents += 1;
+}
+
+async function ensureStorageSegment(incomingBytes) {
+  const now = Date.now();
+  const shouldRoll =
+    !storageState.activePath ||
+    storageState.activeBytes + incomingBytes > STORAGE_SEGMENT_MAX_BYTES ||
+    now - storageState.activeStartedAt > STORAGE_SEGMENT_ROLL_MS;
+  if (shouldRoll) {
+    storageState.activeStartedAt = now;
+    storageState.activeBytes = 0;
+    storageState.activePath = path.join(STORAGE_SEGMENTS_DIR, `trace-${segmentTimestamp(now)}-${process.pid}-${randomSuffix()}.ndjson`);
+  }
+  return storageState.activePath;
+}
+
+function segmentTimestamp(ms) {
+  return new Date(ms).toISOString().replaceAll(":", "-").replaceAll(".", "-");
+}
+
+function randomSuffix() {
+  return Math.random().toString(36).slice(2, 8);
 }
 
 function broadcast(type, payload) {
@@ -303,6 +465,8 @@ function getConversationThread(session, id) {
       forkedFromId: "",
       agentNickname: "",
       agentRole: "",
+      ephemeral: null,
+      threadSource: "",
     };
     session.threadsById.set(id, thread);
     session.threads.push(thread);
@@ -320,6 +484,8 @@ function applyConversationThreadMetadata(thread, metadata, rawSessionId = "") {
   if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
   if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
   if (metadata.agentRole) thread.agentRole = metadata.agentRole;
+  if (metadata.ephemeral !== null && metadata.ephemeral !== undefined) thread.ephemeral = metadata.ephemeral;
+  if (metadata.threadSource) thread.threadSource = metadata.threadSource;
 }
 
 function applyConversationSessionMetadata(session, thread) {
@@ -750,7 +916,69 @@ function trimConversationSessions() {
 function conversationModel() {
   const sessions = [...conversationSessions.values()].map(serializeConversationSession);
   sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
-  return { version: conversationVersion, sessions };
+  return { version: conversationVersion, sessions: groupTemporarySessions(sessions) };
+}
+
+function groupTemporarySessions(sessions) {
+  const normalSessions = [];
+  const temporarySession = {
+    id: TEMPORARY_SESSION_ID,
+    sessionId: TEMPORARY_SESSION_ID,
+    title: TEMPORARY_SESSION_TITLE,
+    cwd: "",
+    preview: "",
+    events: 0,
+    blocks: 0,
+    turnCount: 0,
+    threadCount: 0,
+    lastTs: 0,
+    source: "",
+    kind: "temporary",
+    virtual: true,
+    threads: [],
+  };
+
+  for (const session of sessions) {
+    if (!isTemporaryRootSession(session)) {
+      normalSessions.push(session);
+      continue;
+    }
+
+    temporarySession.threads.push(...session.threads);
+    temporarySession.events += session.events || 0;
+    temporarySession.blocks += session.blocks || 0;
+    temporarySession.turnCount += session.turnCount || 0;
+    temporarySession.lastTs = Math.max(temporarySession.lastTs || 0, session.lastTs || 0);
+    temporarySession.source = mergeSourceLabel(temporarySession.source, session.source);
+    if (!temporarySession.preview && session.preview) temporarySession.preview = session.preview;
+  }
+
+  if (temporarySession.threads.length) {
+    temporarySession.threads.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+    temporarySession.threadCount = temporarySession.threads.length;
+    temporarySession.source ||= "local";
+    normalSessions.push(temporarySession);
+  }
+
+  return normalSessions;
+}
+
+function isTemporaryRootSession(session) {
+  const rootThreads = (session.threads || []).filter((thread) => !thread.parentThreadId && !thread.forkedFromId);
+  return rootThreads.length > 0 && rootThreads.every((thread) => isTemporaryRootThread(thread));
+}
+
+function isTemporaryRootThread(thread) {
+  if (!thread || thread.parentThreadId || thread.forkedFromId) return false;
+  if (thread.ephemeral === true) return true;
+  if (thread.ephemeral === false) return false;
+  if (thread.threadSource === "system") return true;
+  return isMetadataGapRootThread(thread);
+}
+
+function isMetadataGapRootThread(thread) {
+  const hasContent = (thread.blocks || 0) > 0 || (thread.turns || []).some((turn) => (turn.blocks || []).length > 0);
+  return !hasContent && !thread.title && !thread.threadPreview && !thread.preview && !thread.cwd;
 }
 
 function serializeConversationSession(session) {
@@ -798,6 +1026,8 @@ function serializeConversationThread(thread) {
     forkedFromId: thread.forkedFromId,
     agentNickname: thread.agentNickname,
     agentRole: thread.agentRole,
+    ephemeral: thread.ephemeral,
+    threadSource: thread.threadSource,
     turns,
   };
 }
@@ -849,6 +1079,8 @@ function compactEvent(event) {
     threadName: metadata?.title || "",
     threadPreview: metadata?.preview || "",
     threadCwd: metadata?.cwd || "",
+    threadEphemeral: metadata?.ephemeral ?? null,
+    threadSource: metadata?.threadSource || "",
     parseError: event.parseError || null,
     rawParseError: event.rawParseError || null,
     raw: truncateText(event.raw || "", COMPACT_RAW_CHARS),
@@ -954,7 +1186,9 @@ function compactThreadRecord(item) {
   const title = stringValue(item.name || item.title || item.thread_name);
   const preview = stringValue(item.preview);
   const cwd = stringValue(item.cwd || item.path);
-  if (!id || (!title && !preview && !cwd && !sessionId)) return null;
+  const ephemeral = booleanValue(item.ephemeral);
+  const threadSource = stringValue(item.threadSource || item.thread_source);
+  if (!id || (!title && !preview && !cwd && !sessionId && ephemeral === null && !threadSource)) return null;
   return {
     id,
     sessionId,
@@ -962,6 +1196,8 @@ function compactThreadRecord(item) {
     forkedFromId: stringValue(item.forkedFromId || item.forked_from_id),
     agentNickname: stringValue(item.agentNickname || item.agent_nickname),
     agentRole: stringValue(item.agentRole || item.agent_role),
+    ephemeral,
+    threadSource,
     name: title,
     title,
     preview,
@@ -1007,6 +1243,14 @@ function updateThreadMetadataFromEvent(event) {
 
 function mergeThreadMetadata(record, source) {
   if (!record?.id) return;
+  const hasRelationMetadata =
+    (record.ephemeral !== null && record.ephemeral !== undefined) ||
+    Boolean(record.threadSource) ||
+    Boolean(record.parentThreadId) ||
+    Boolean(record.forkedFromId) ||
+    Boolean(record.agentNickname) ||
+    Boolean(record.agentRole);
+  if (!record.name && !record.preview && !record.cwd && !record.sessionId && !hasRelationMetadata) return;
   const updatedAt = numericTimestamp(record.updatedAt ?? record.updated_at ?? record.recencyAt ?? record.createdAt ?? record.created_at);
   const current = threadMetadata.get(record.id) || {
     id: record.id,
@@ -1018,6 +1262,8 @@ function mergeThreadMetadata(record, source) {
     forkedFromId: "",
     agentNickname: "",
     agentRole: "",
+    ephemeral: null,
+    threadSource: "",
     updatedAt: 0,
     source: "",
   };
@@ -1032,6 +1278,8 @@ function mergeThreadMetadata(record, source) {
     forkedFromId: record.forkedFromId || current.forkedFromId || "",
     agentNickname: record.agentNickname || current.agentNickname || "",
     agentRole: record.agentRole || current.agentRole || "",
+    ephemeral: record.ephemeral !== null && record.ephemeral !== undefined ? record.ephemeral : current.ephemeral,
+    threadSource: record.threadSource || current.threadSource || "",
     updatedAt: Math.max(current.updatedAt, updatedAt),
     source: source || current.source,
   });
@@ -1093,10 +1341,231 @@ async function refreshSessionIndexMetadata() {
   }
 }
 
+async function preloadStoredEvents() {
+  if (!STORAGE_ENABLED || !STORAGE_PRELOAD_ENABLED) return;
+  const files = await listStorageSegmentFiles();
+  if (!files.length) return;
+  let remainingBytes = STORAGE_PRELOAD_BYTES;
+  const selected = [];
+  for (const file of [...files].reverse()) {
+    if (remainingBytes <= 0) break;
+    selected.push(file);
+    remainingBytes -= file.size;
+  }
+  selected.reverse();
+
+  const restored = [];
+  for (const file of selected) {
+    try {
+      for await (const line of readStorageSegmentLines(file.path)) {
+        if (!line.trim()) continue;
+        restored.push(line);
+        if (restored.length > STORAGE_PRELOAD_EVENTS) restored.shift();
+      }
+    } catch (error) {
+      storageState.lastError = `restore ${path.basename(file.path)} failed: ${error.message}`;
+    }
+  }
+
+  for (const line of restored) {
+    try {
+      const event = JSON.parse(line);
+      pushEvent(event, { persist: false, broadcast: false, countParsed: false });
+    } catch {
+      // Ignore malformed persisted rows; live capture remains authoritative.
+    }
+  }
+}
+
+function readStorageSegmentLines(filePath) {
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  return readline.createInterface({ input: stream, crlfDelay: Infinity });
+}
+
+async function listStorageSegmentFiles() {
+  try {
+    const entries = await fsp.readdir(STORAGE_SEGMENTS_DIR, { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".ndjson")) continue;
+      const filePath = path.join(STORAGE_SEGMENTS_DIR, entry.name);
+      try {
+        const stat = await fsp.stat(filePath);
+        files.push({
+          name: entry.name,
+          path: filePath,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          createdMs: storageSegmentTime(entry.name) || stat.birthtimeMs || stat.mtimeMs,
+        });
+      } catch {
+        // File may have been removed by cleanup.
+      }
+    }
+    files.sort((a, b) => a.createdMs - b.createdMs || a.name.localeCompare(b.name));
+    return files;
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function storageSegmentTime(filename) {
+  const match = /^trace-(.+?)-\d+-[a-z0-9]+\.ndjson$/i.exec(filename);
+  if (!match) return 0;
+  const iso = match[1].replace(
+    /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3}Z)$/,
+    "$1:$2:$3.$4",
+  );
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function storageStats({ force = false } = {}) {
+  const now = Date.now();
+  if (
+    !force &&
+    storageState.scanCache &&
+    now - storageState.scanCache.scannedAt < STORAGE_SCAN_CACHE_MS &&
+    storageState.writeDeltaSinceScan < STORAGE_BATCH_BYTES
+  ) {
+    return {
+      ...storageState.scanCache,
+      pendingBytes: storageState.pendingBytes,
+      pendingEvents: storageState.pending.length,
+      writtenEvents: storageState.writtenEvents,
+      writtenBytes: storageState.writtenBytes,
+      droppedEvents: storageState.droppedEvents,
+      lastFlushTs: storageState.lastFlushTs,
+      lastError: storageState.lastError,
+    };
+  }
+
+  let files = [];
+  let sizeBytes = 0;
+  try {
+    files = await listStorageSegmentFiles();
+    sizeBytes = files.reduce((sum, file) => sum + file.size, 0);
+  } catch (error) {
+    storageState.lastError = error.message;
+  }
+  const oldest = files[0] || null;
+  const newest = files[files.length - 1] || null;
+  const result = {
+    enabled: STORAGE_ENABLED,
+    storageDir: STORAGE_DIR,
+    segmentsDir: STORAGE_SEGMENTS_DIR,
+    sizeBytes,
+    segmentCount: files.length,
+    oldestTs: oldest?.createdMs || 0,
+    newestTs: newest?.createdMs || 0,
+    largestSegments: [...files]
+      .sort((a, b) => b.size - a.size)
+      .slice(0, 8)
+      .map(publicSegmentInfo),
+    pendingBytes: storageState.pendingBytes,
+    pendingEvents: storageState.pending.length,
+    writtenEvents: storageState.writtenEvents,
+    writtenBytes: storageState.writtenBytes,
+    droppedEvents: storageState.droppedEvents,
+    lastFlushTs: storageState.lastFlushTs,
+    lastError: storageState.lastError,
+    scannedAt: now,
+    policy: {
+      flushIntervalMs: STORAGE_FLUSH_INTERVAL_MS,
+      batchEvents: STORAGE_BATCH_EVENTS,
+      batchBytes: STORAGE_BATCH_BYTES,
+      segmentMaxBytes: STORAGE_SEGMENT_MAX_BYTES,
+      segmentRollMs: STORAGE_SEGMENT_ROLL_MS,
+      pendingMaxBytes: STORAGE_PENDING_MAX_BYTES,
+    },
+  };
+  storageState.scanCache = result;
+  storageState.writeDeltaSinceScan = 0;
+  return result;
+}
+
+function publicSegmentInfo(file) {
+  return {
+    name: file.name,
+    size: file.size,
+    createdMs: file.createdMs,
+    mtimeMs: file.mtimeMs,
+  };
+}
+
+async function cleanupStorage({ keepDays = null, targetBytes = null, dryRun = false } = {}) {
+  if (!STORAGE_ENABLED) return { deletedBytes: 0, deletedSegments: 0, candidates: [] };
+  await flushStoragePending();
+  const files = await listStorageSegmentFiles();
+  const now = Date.now();
+  const keepDaysNumber = keepDays == null ? null : Math.max(0, Number(keepDays));
+  const targetBytesNumber = targetBytes == null ? null : Math.max(0, Number(targetBytes));
+  const keepCutoff = keepDaysNumber == null ? 0 : now - keepDaysNumber * 24 * 60 * 60 * 1000;
+  const activePath = storageState.activePath ? path.resolve(storageState.activePath) : "";
+  let candidates = [];
+
+  if (keepDaysNumber != null) {
+    candidates = files.filter((file) => file.createdMs && file.createdMs < keepCutoff);
+  }
+
+  if (targetBytesNumber != null) {
+    const protectedPaths = new Set(candidates.map((file) => path.resolve(file.path)));
+    let remainingSize = files.reduce((sum, file) => sum + file.size, 0) - candidates.reduce((sum, file) => sum + file.size, 0);
+    for (const file of files) {
+      if (remainingSize <= targetBytesNumber) break;
+      const resolved = path.resolve(file.path);
+      if (protectedPaths.has(resolved)) continue;
+      candidates.push(file);
+      protectedPaths.add(resolved);
+      remainingSize -= file.size;
+    }
+  }
+
+  candidates = candidates.filter((file) => path.resolve(file.path) !== activePath);
+  let deletedBytes = 0;
+  let deletedSegments = 0;
+  const deleted = [];
+  for (const file of candidates) {
+    deletedBytes += file.size;
+    deletedSegments += 1;
+    deleted.push(publicSegmentInfo(file));
+    if (!dryRun) {
+      try {
+        await fsp.unlink(file.path);
+      } catch (error) {
+        if (error.code !== "ENOENT") storageState.lastError = error.message;
+      }
+    }
+  }
+  if (!dryRun) {
+    storageState.scanCache = null;
+    broadcast("status", currentStatus());
+  }
+  return {
+    dryRun,
+    deletedBytes,
+    deletedSegments,
+    candidates: deleted,
+    keepDays: keepDaysNumber,
+    targetBytes: targetBytesNumber,
+  };
+}
+
 function stringValue(value) {
   if (typeof value !== "string") return "";
   const text = value.trim();
   return text.includes("\uFFFD") ? "" : text;
+}
+
+function booleanValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (text === "true") return true;
+    if (text === "false") return false;
+  }
+  return null;
 }
 
 function numericTimestamp(value) {
@@ -1268,6 +1737,7 @@ function currentStatus() {
     clients: clients.size,
     ingestClients,
     totalIngested,
+    totalRestored,
     conversationVersion,
     conversationSessions: conversationSessions.size,
     maxEvents: MAX_EVENTS,
@@ -1278,6 +1748,19 @@ function currentStatus() {
     sessionIndexLoaded,
     sessionIndexRecords,
     threadMetadataCount: threadMetadata.size,
+    storage: {
+      enabled: STORAGE_ENABLED,
+      storageDir: STORAGE_DIR,
+      pendingEvents: storageState.pending.length,
+      pendingBytes: storageState.pendingBytes,
+      writtenEvents: storageState.writtenEvents,
+      writtenBytes: storageState.writtenBytes,
+      droppedEvents: storageState.droppedEvents,
+      lastFlushTs: storageState.lastFlushTs,
+      lastError: storageState.lastError,
+      cachedSizeBytes: storageState.scanCache?.sizeBytes ?? null,
+      cachedSegmentCount: storageState.scanCache?.segmentCount ?? null,
+    },
   };
 }
 
@@ -1292,6 +1775,18 @@ function sendJson(res, value, statusCode = 200) {
     "cache-control": "no-store",
   });
   res.end(body);
+}
+
+async function readJsonBody(req, maxBytes = 1024 * 1024) {
+  let body = "";
+  for await (const chunk of req) {
+    body += chunk;
+    if (Buffer.byteLength(body) > maxBytes) {
+      throw new Error("request body too large");
+    }
+  }
+  if (!body.trim()) return {};
+  return JSON.parse(body);
 }
 
 async function serveStatic(req, res) {
@@ -1331,6 +1826,36 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, currentStatus());
     return;
   }
+  if (url.pathname === "/api/storage") {
+    sendJson(res, await storageStats({ force: url.searchParams.get("force") === "1" }));
+    return;
+  }
+  if (url.pathname === "/api/storage/cleanup" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const result = await cleanupStorage({
+        keepDays: body.keepDays ?? null,
+        targetBytes: body.targetBytes ?? null,
+        dryRun: Boolean(body.dryRun),
+      });
+      sendJson(res, result);
+    } catch (error) {
+      sendJson(res, { error: error.message }, 400);
+    }
+    return;
+  }
+  if (url.pathname === "/api/ingest" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req, 8 * 1024 * 1024);
+      const rows = Array.isArray(body) ? body : [body];
+      for (const row of rows) pushOuterEvent(row);
+      broadcast("status", currentStatus());
+      sendJson(res, { ok: true, ingested: rows.length });
+    } catch (error) {
+      sendJson(res, { error: error.message }, 400);
+    }
+    return;
+  }
   if (url.pathname === "/api/events") {
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "1000"), MAX_EVENTS));
     const events = ring.slice(-limit);
@@ -1366,16 +1891,31 @@ const server = http.createServer(async (req, res) => {
 
 await refreshSessionIndexMetadata();
 setInterval(refreshSessionIndexMetadata, 5000).unref();
+await preloadStoredEvents();
 await initializeTail();
 startWatching();
 const ingestServer = startIngestServer();
 server.listen(PORT, HOST, () => {
   console.log(`Codex trace viewer listening on http://${HOST}:${PORT}`);
   console.log(`Trace file: ${TRACE_FILE}`);
+  console.log(`Review store: ${STORAGE_ENABLED ? STORAGE_DIR : "disabled"}`);
 });
 
-process.on("SIGINT", () => {
+async function shutdown() {
+  if (storageState.flushTimer) {
+    clearTimeout(storageState.flushTimer);
+    storageState.flushTimer = null;
+  }
+  await flushStoragePending();
   watcher?.close();
   ingestServer.close();
   server.close(() => process.exit(0));
+}
+
+process.on("SIGINT", () => {
+  void shutdown();
+});
+
+process.on("SIGTERM", () => {
+  void shutdown();
 });
