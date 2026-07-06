@@ -4,6 +4,7 @@ const state = {
   selectedViewId: null,
   selectedSessionId: "",
   expandedSessionId: "",
+  selectedThreadId: "",
   selectedTurnId: "",
   selectedSegmentKey: "",
   activeTab: "conversation",
@@ -102,14 +103,15 @@ function passesFilters(event) {
 }
 
 function eventMatchesThreadFilter(event, needle) {
+  if (String(event.sessionId || "").toLowerCase().includes(needle)) return true;
   if (String(event.threadId || "").toLowerCase().includes(needle)) return true;
   const raw = event.rawJson;
   const params = raw?.params || {};
   const data = raw?.result?.data;
-  if (String(params.threadId || params.thread_id || params.parentThreadId || "").toLowerCase().includes(needle)) return true;
+  if (String(params.sessionId || params.session_id || params.threadId || params.thread_id || params.parentThreadId || "").toLowerCase().includes(needle)) return true;
   if (Array.isArray(data)) {
     return data.some((item) => {
-      const haystack = `${item?.id || ""}\n${item?.threadId || ""}\n${item?.thread_id || ""}\n${item?.name || ""}\n${item?.title || ""}\n${item?.preview || ""}\n${item?.cwd || ""}`.toLowerCase();
+      const haystack = `${item?.sessionId || ""}\n${item?.session_id || ""}\n${item?.id || ""}\n${item?.threadId || ""}\n${item?.thread_id || ""}\n${item?.name || ""}\n${item?.title || ""}\n${item?.preview || ""}\n${item?.cwd || ""}`.toLowerCase();
       return haystack.includes(needle);
     });
   }
@@ -147,6 +149,7 @@ function renderSessionsAndConversation() {
   if (!state.selectedSessionId || !model.sessions.some((session) => session.id === state.selectedSessionId)) {
     state.selectedSessionId = model.sessions[0]?.id || "";
     state.expandedSessionId = "";
+    state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
   }
@@ -164,23 +167,44 @@ function filteredConversationModel() {
   if (!state.conversationModel?.sessions) return null;
   const sessions = [];
   for (const session of state.conversationModel.sessions) {
-    const filteredTurns = [];
+    const filteredThreads = [];
     let events = 0;
     let blocks = 0;
+    let turnCount = 0;
     let preview = "";
-    for (const turn of session.turns || []) {
-      const visibleBlocks = (turn.blocks || []).filter((block) => !isLifecycleOnlyBlock(block));
-      const filteredBlocks = visibleBlocks.filter((block) => blockMatchesFilters(block, session, turn));
-      if (!filteredBlocks.length) continue;
-      filteredTurns.push({ ...turn, blocks: filteredBlocks });
-      blocks += filteredBlocks.length;
-      events += filteredBlocks.reduce((sum, block) => sum + (block.eventCount || block.events?.length || 0), 0);
-      if (!preview) preview = filteredBlocks.find((block) => block.preview)?.preview || "";
+    for (const thread of session.threads || legacyThreads(session)) {
+      const filteredTurns = [];
+      let threadEvents = 0;
+      let threadBlocks = 0;
+      let threadPreview = "";
+      for (const turn of thread.turns || []) {
+        const visibleBlocks = (turn.blocks || []).filter((block) => !isLifecycleOnlyBlock(block));
+        const filteredBlocks = visibleBlocks.filter((block) => blockMatchesFilters(block, session, thread, turn));
+        if (!filteredBlocks.length) continue;
+        filteredTurns.push({ ...turn, blocks: filteredBlocks });
+        threadBlocks += filteredBlocks.length;
+        threadEvents += filteredBlocks.reduce((sum, block) => sum + (block.eventCount || block.events?.length || 0), 0);
+        if (!threadPreview) threadPreview = filteredBlocks.find((block) => block.preview)?.preview || "";
+      }
+      if (!filteredTurns.length && hasActiveConversationFilters()) continue;
+      filteredThreads.push({
+        ...thread,
+        turns: filteredTurns,
+        blocks: threadBlocks,
+        events: threadEvents,
+        preview: threadPreview || thread.preview,
+      });
+      blocks += threadBlocks;
+      events += threadEvents;
+      turnCount += filteredTurns.length;
+      if (!preview) preview = threadPreview || thread.preview || thread.threadPreview || "";
     }
-    if (!filteredTurns.length && hasActiveConversationFilters()) continue;
+    if (!filteredThreads.length && hasActiveConversationFilters()) continue;
     sessions.push({
       ...session,
-      turns: filteredTurns,
+      threads: filteredThreads,
+      threadCount: filteredThreads.length,
+      turnCount,
       blocks,
       events,
       preview: preview || session.preview,
@@ -197,7 +221,7 @@ function hasActiveConversationFilters() {
   return Boolean(els.dirFilter.value || els.methodFilter.value.trim() || els.threadFilter.value.trim() || els.textFilter.value.trim());
 }
 
-function blockMatchesFilters(block, session, turn) {
+function blockMatchesFilters(block, session, threadModel, turn) {
   const dir = els.dirFilter.value;
   const method = els.methodFilter.value.trim().toLowerCase();
   const thread = els.threadFilter.value.trim().toLowerCase();
@@ -208,11 +232,11 @@ function blockMatchesFilters(block, session, turn) {
     if (!methods.includes(method)) return false;
   }
   if (thread) {
-    const threadHaystack = `${session.id || ""}\n${session.title || ""}\n${session.threadPreview || ""}\n${session.cwd || ""}\n${turn.id || ""}`.toLowerCase();
+    const threadHaystack = `${session.id || ""}\n${session.sessionId || ""}\n${session.title || ""}\n${session.preview || ""}\n${session.cwd || ""}\n${threadModel.id || ""}\n${threadModel.threadId || ""}\n${threadModel.sessionId || ""}\n${threadModel.parentThreadId || ""}\n${threadModel.forkedFromId || ""}\n${threadModel.title || ""}\n${threadModel.threadPreview || ""}\n${threadModel.cwd || ""}\n${turn.id || ""}`.toLowerCase();
     if (!threadHaystack.includes(thread)) return false;
   }
   if (text) {
-    const haystack = `${block.preview || ""}\n${blockText(block)}\n${block.itemId || ""}\n${turn.id || ""}\n${session.id || ""}`.toLowerCase();
+    const haystack = `${block.preview || ""}\n${blockText(block)}\n${block.itemId || ""}\n${turn.id || ""}\n${threadModel.id || ""}\n${session.id || ""}`.toLowerCase();
     if (!haystack.includes(text)) return false;
   }
   return true;
@@ -235,7 +259,7 @@ function renderSessionList(sessions) {
     button.innerHTML = `
       <span class="sessionName">${escapeHtml(sessionTitle(session))}</span>
       <span class="sessionId">${escapeHtml(sourceLabel(session.source))} / ${escapeHtml(shortId(session.id))}</span>
-      <span class="sessionStats">${session.turns.length} turns / ${session.blocks} blocks / ${session.events} events</span>
+      <span class="sessionStats">${session.threadCount || sessionThreads(session).length} threads / ${session.turnCount || countTurns(session)} turns / ${session.blocks} blocks / ${session.events} events</span>
       <span class="sessionPreview">${escapeHtml(session.preview || "")}</span>
     `;
     button.addEventListener("click", () => {
@@ -243,6 +267,7 @@ function renderSessionList(sessions) {
       state.selectedSessionId = session.id;
       state.expandedSessionId = session.id;
       if (switchingSession) {
+        state.selectedThreadId = "";
         state.selectedTurnId = "";
         state.selectedSegmentKey = "";
       }
@@ -260,12 +285,13 @@ function renderTurnOverlay(session) {
   els.turnOverlay.setAttribute("aria-hidden", String(!open));
   els.turnOverlayTitle.textContent = open ? sessionTitle(session) : "Turns";
   els.turnOverlayMeta.textContent = open
-    ? `${session.turns.length} turns / ${session.blocks} blocks / ${session.events} events`
+    ? `${sessionThreads(session).length} threads / ${countTurns(session)} turns / ${session.blocks} blocks / ${session.events} events`
     : "Select a session to inspect turns.";
   els.turnOverlayList.innerHTML = "";
   if (!open) return;
 
-  if (!session.turns.length) {
+  const threads = sessionThreads(session);
+  if (!threads.length) {
     const empty = document.createElement("div");
     empty.className = "turnOverlayEmpty";
     empty.textContent = "No turns in the current filters.";
@@ -274,23 +300,33 @@ function renderTurnOverlay(session) {
   }
 
   const fragment = document.createDocumentFragment();
-  session.turns.forEach((turn, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "sessionTurnRow";
-    if (turn.id === state.selectedTurnId) button.classList.add("active");
-    button.title = `Turn ${index + 1} / ${shortId(turn.id)} / ${turn.blocks.length} segments`;
-    button.dataset.turnId = turn.id;
-    button.innerHTML = `
-      <span class="turnRailIndex">${index + 1}</span>
-      <span class="turnRailText">${escapeHtml(turnLabel(turn, index))}</span>
-      <span class="turnRailCount">${turn.blocks.length}</span>
+  threads.forEach((threadModel) => {
+    const threadHeader = document.createElement("div");
+    threadHeader.className = "turnThreadHeader";
+    threadHeader.innerHTML = `
+      <span class="turnThreadName">${escapeHtml(threadTitle(threadModel))}</span>
+      <span class="turnThreadId">${escapeHtml(shortId(threadModel.id))}</span>
     `;
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectTurn(turn.id);
+    fragment.appendChild(threadHeader);
+    threadModel.turns.forEach((turn, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "sessionTurnRow";
+      if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) button.classList.add("active");
+      button.title = `${shortId(threadModel.id)} / Turn ${index + 1} / ${shortId(turn.id)} / ${turn.blocks.length} segments`;
+      button.dataset.threadId = threadModel.id;
+      button.dataset.turnId = turn.id;
+      button.innerHTML = `
+        <span class="turnRailIndex">${index + 1}</span>
+        <span class="turnRailText">${escapeHtml(turnLabel(turn, index))}</span>
+        <span class="turnRailCount">${turn.blocks.length}</span>
+      `;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        selectTurn(threadModel.id, turn.id);
+      });
+      fragment.appendChild(button);
     });
-    fragment.appendChild(button);
   });
   els.turnOverlayList.appendChild(fragment);
 }
@@ -309,21 +345,24 @@ function renderConversation(session) {
     return;
   }
 
-  if (state.selectedTurnId && !session.turns.some((turn) => turn.id === state.selectedTurnId)) {
+  if (state.selectedTurnId && !findTurnInSession(session, state.selectedThreadId, state.selectedTurnId)) {
+    state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
   }
 
   els.conversationTitle.textContent = sessionTitle(session);
-  els.conversationMeta.textContent = [sourceLabel(session.source), session.id, session.cwd, `${session.turns.length} turns`, `${session.blocks} blocks`].filter(Boolean).join(" / ");
+  els.conversationMeta.textContent = [sourceLabel(session.source), `session ${session.id}`, session.cwd, `${sessionThreads(session).length} threads`, `${countTurns(session)} turns`, `${session.blocks} blocks`].filter(Boolean).join(" / ");
 
-  const turns = session.turns;
   els.conversationMessages.innerHTML = "";
   const fragment = document.createDocumentFragment();
-  for (const turn of turns) {
-    fragment.appendChild(turnDivider(turn));
-    for (const block of turn.blocks) {
-      fragment.appendChild(segmentCard(block, turn));
+  for (const threadModel of sessionThreads(session)) {
+    fragment.appendChild(threadDivider(threadModel));
+    for (const turn of threadModel.turns) {
+      fragment.appendChild(turnDivider(threadModel, turn));
+      for (const block of turn.blocks) {
+        fragment.appendChild(segmentCard(block, threadModel, turn));
+      }
     }
   }
   if (!fragment.childNodes.length) {
@@ -334,11 +373,27 @@ function renderConversation(session) {
   renderSegmentDetail(findSelectedSegment(session));
 }
 
-function turnDivider(turn) {
+function threadDivider(threadModel) {
+  const el = document.createElement("div");
+  el.className = "threadDivider";
+  if (threadModel.id === state.selectedThreadId) el.classList.add("active");
+  el.id = `thread-${cssSafeId(threadModel.id)}`;
+  el.dataset.threadId = threadModel.id;
+  const parent = threadModel.parentThreadId ? ` / parent ${shortId(threadModel.parentThreadId)}` : "";
+  const fork = threadModel.forkedFromId ? ` / fork ${shortId(threadModel.forkedFromId)}` : "";
+  el.innerHTML = `
+    <span>${escapeHtml(threadTitle(threadModel))}</span>
+    <span>${escapeHtml(shortId(threadModel.id))}${escapeHtml(parent)}${escapeHtml(fork)}</span>
+  `;
+  return el;
+}
+
+function turnDivider(threadModel, turn) {
   const el = document.createElement("div");
   el.className = "turnDivider";
-  if (turn.id === state.selectedTurnId) el.classList.add("active");
-  el.id = `turn-${cssSafeId(turn.id)}`;
+  if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) el.classList.add("active");
+  el.id = `turn-${cssSafeId(threadModel.id)}-${cssSafeId(turn.id)}`;
+  el.dataset.threadId = threadModel.id;
   el.dataset.turnId = turn.id;
   const status = turn.status ? ` / ${turn.status}` : "";
   const duration = turn.durationMs != null ? ` / ${durationLabel(turn.durationMs)}` : "";
@@ -355,13 +410,14 @@ function turnLabel(turn, index) {
   return displayPreview(first) || first?.label || `Turn ${index + 1}`;
 }
 
-function selectTurn(turnId) {
+function selectTurn(threadId, turnId) {
+  state.selectedThreadId = threadId;
   state.selectedTurnId = turnId;
   state.selectedSegmentKey = "";
   for (const divider of document.querySelectorAll(".turnDivider.active")) {
     divider.classList.remove("active");
   }
-  const target = document.querySelector(`#turn-${cssSafeId(turnId)}`);
+  const target = document.querySelector(`#turn-${cssSafeId(threadId)}-${cssSafeId(turnId)}`);
   target?.classList.add("active");
   target?.scrollIntoView({ behavior: "smooth", block: "start" });
   renderSegmentsActiveState();
@@ -377,7 +433,7 @@ function cssEscape(value) {
   return String(value || "").replace(/["\\]/g, "\\$&");
 }
 
-function segmentCard(block, turn) {
+function segmentCard(block, threadModel, turn) {
   const article = document.createElement("article");
   article.className = `messageBlock segmentCard role-${block.role}`;
   if (block.key === state.selectedSegmentKey) article.classList.add("selected");
@@ -395,11 +451,11 @@ function segmentCard(block, turn) {
     </div>
     <div class="segmentPreview">${escapeHtml(preview)}</div>
   `;
-  article.addEventListener("click", () => selectSegment(block, turn));
+  article.addEventListener("click", () => selectSegment(block, threadModel, turn));
   article.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      selectSegment(block, turn);
+      selectSegment(block, threadModel, turn);
     }
   });
   return article;
@@ -449,11 +505,12 @@ function userFacingUserText(value) {
   return lines.slice(index).join("\n").trim() || text;
 }
 
-function selectSegment(block, turn) {
+function selectSegment(block, threadModel, turn) {
+  state.selectedThreadId = threadModel.id;
   state.selectedTurnId = turn.id;
   state.selectedSegmentKey = block.key;
   renderSegmentsActiveState();
-  renderSegmentDetail({ block, turn });
+  renderSegmentDetail({ block, thread: threadModel, turn });
 }
 
 function renderSegmentsActiveState() {
@@ -466,22 +523,30 @@ function renderSegmentsActiveState() {
   for (const divider of document.querySelectorAll(".turnDivider.active")) {
     divider.classList.remove("active");
   }
-  if (state.selectedTurnId) {
-    document.querySelector(`#turn-${cssSafeId(state.selectedTurnId)}`)?.classList.add("active");
+  for (const divider of document.querySelectorAll(".threadDivider.active")) {
+    divider.classList.remove("active");
+  }
+  if (state.selectedThreadId) {
+    document.querySelector(`#thread-${cssSafeId(state.selectedThreadId)}`)?.classList.add("active");
+  }
+  if (state.selectedThreadId && state.selectedTurnId) {
+    document.querySelector(`#turn-${cssSafeId(state.selectedThreadId)}-${cssSafeId(state.selectedTurnId)}`)?.classList.add("active");
   }
   for (const row of document.querySelectorAll(".sessionTurnRow.active")) {
     row.classList.remove("active");
   }
-  if (state.selectedTurnId) {
-    document.querySelector(`.sessionTurnRow[data-turn-id="${cssEscape(state.selectedTurnId)}"]`)?.classList.add("active");
+  if (state.selectedThreadId && state.selectedTurnId) {
+    document.querySelector(`.sessionTurnRow[data-thread-id="${cssEscape(state.selectedThreadId)}"][data-turn-id="${cssEscape(state.selectedTurnId)}"]`)?.classList.add("active");
   }
 }
 
 function findSelectedSegment(session) {
   if (!state.selectedSegmentKey) return null;
-  for (const turn of session.turns) {
-    const block = turn.blocks.find((candidate) => candidate.key === state.selectedSegmentKey);
-    if (block) return { block, turn };
+  for (const threadModel of sessionThreads(session)) {
+    for (const turn of threadModel.turns) {
+      const block = turn.blocks.find((candidate) => candidate.key === state.selectedSegmentKey);
+      if (block) return { block, thread: threadModel, turn };
+    }
   }
   state.selectedSegmentKey = "";
   return null;
@@ -498,7 +563,7 @@ function renderSegmentDetail(selection) {
     closeSegmentRaw();
     return;
   }
-  const { block, turn } = selection;
+  const { block, thread, turn } = selection;
   const body = blockText(block) || "(empty)";
   const displayedBody = truncateForDisplay(body);
   const truncated = displayedBody.length !== body.length;
@@ -508,8 +573,8 @@ function renderSegmentDetail(selection) {
   });
   els.segmentDetail.classList.add("open");
   els.segmentDetailTitle.textContent = `${block.label} / ${block.meta || block.kind}`;
-  els.segmentDetailMeta.textContent = [`Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
-  els.segmentRawMeta.textContent = [`Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
+  els.segmentDetailMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
+  els.segmentRawMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
   els.segmentContentPre.textContent = `${displayedBody}${truncated ? "\n\n[display truncated]" : ""}`;
   els.segmentRawPre.textContent = JSON.stringify(raw, null, 2);
 }
@@ -523,6 +588,51 @@ function openSegmentRaw() {
 function closeSegmentRaw() {
   els.segmentRawModal.classList.remove("open");
   els.segmentRawBackdrop.classList.remove("open");
+}
+
+function sessionThreads(session) {
+  return session?.threads || legacyThreads(session);
+}
+
+function legacyThreads(session) {
+  if (!session?.turns) return [];
+  return [
+    {
+      id: session.id,
+      threadId: session.id,
+      sessionId: session.id,
+      title: session.title || "",
+      cwd: session.cwd || "",
+      threadPreview: session.threadPreview || "",
+      preview: session.preview || "",
+      events: session.events || 0,
+      blocks: session.blocks || 0,
+      lastTs: session.lastTs || 0,
+      source: session.source || "",
+      turns: session.turns || [],
+    },
+  ];
+}
+
+function countTurns(session) {
+  return sessionThreads(session).reduce((sum, thread) => sum + (thread.turns?.length || 0), 0);
+}
+
+function findTurnInSession(session, threadId, turnId) {
+  return sessionThreads(session).some((thread) => {
+    if (threadId && thread.id !== threadId) return false;
+    return (thread.turns || []).some((turn) => turn.id === turnId);
+  });
+}
+
+function sessionTitle(session) {
+  return session.title || session.preview || `Session ${shortId(session.id)}`;
+}
+
+function threadTitle(thread) {
+  const role = thread.agentRole || thread.agentNickname || "";
+  const base = thread.title || thread.threadPreview || thread.preview || `Thread ${shortId(thread.id)}`;
+  return role ? `${base} (${role})` : base;
 }
 
 function truncateForDisplay(value) {
@@ -591,29 +701,45 @@ function buildConversationModel(events, allEvents = events) {
   for (const event of events) {
     const threadId = event.threadId || event.rawJson?.params?.threadId || event.rawJson?.params?.thread_id;
     if (!threadId) continue;
-    const session = getSession(sessionMap, threadId);
-    applySessionMetadata(session, threadMetadata.get(threadId));
+    const metadata = threadMetadata.get(threadId);
+    const sessionId = event.sessionId || metadata?.sessionId || threadId;
+    const session = getSession(sessionMap, sessionId);
+    const thread = getThread(session, threadId);
+    applyThreadMetadata(thread, metadata);
+    applySessionMetadata(session, thread);
     session.events += 1;
+    thread.events += 1;
     session.lastTs = Math.max(session.lastTs || 0, event.ts_ms || 0);
+    thread.lastTs = Math.max(thread.lastTs || 0, event.ts_ms || 0);
     session.source = mergeSourceLabel(session.source, event.source);
+    thread.source = mergeSourceLabel(thread.source, event.source);
     const extracted = extractConversationEvent(event);
     if (!extracted) continue;
     const turnId = extracted.turnId || event.turnId || "unknown-turn";
-    const turn = getTurn(session, turnId);
+    const turn = getTurn(thread, turnId);
     applyTurnMeta(turn, event);
     if (extracted.block) {
       applyBlock(turn, extracted.block, event);
+      if (!thread.preview && extracted.block.preview) thread.preview = extracted.block.preview;
       if (!session.preview && extracted.block.preview) session.preview = extracted.block.preview;
     }
   }
   const sessions = [...sessionMap.values()];
   for (const session of sessions) {
-    session.turns.sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
     session.blocks = 0;
-    for (const turn of session.turns) {
-      turn.blocks.sort((a, b) => (a.firstSeq || 0) - (b.firstSeq || 0));
-      session.blocks += turn.blocks.length;
+    session.turnCount = 0;
+    session.threadCount = session.threads.length;
+    for (const thread of session.threads) {
+      thread.turns.sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
+      thread.blocks = 0;
+      for (const turn of thread.turns) {
+        turn.blocks.sort((a, b) => (a.firstSeq || 0) - (b.firstSeq || 0));
+        thread.blocks += turn.blocks.length;
+      }
+      session.blocks += thread.blocks;
+      session.turnCount += thread.turns.length;
     }
+    session.threads.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
   }
   sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
   return { sessions };
@@ -621,9 +747,36 @@ function buildConversationModel(events, allEvents = events) {
 
 function getSession(map, id) {
   if (!map.has(id)) {
-    map.set(id, { id, title: "", cwd: "", threadPreview: "", turnsById: new Map(), turns: [], events: 0, blocks: 0, preview: "", lastTs: 0, source: "" });
+    map.set(id, { id, sessionId: id, title: "", cwd: "", threadsById: new Map(), threads: [], events: 0, blocks: 0, turnCount: 0, threadCount: 0, preview: "", lastTs: 0, source: "" });
   }
   return map.get(id);
+}
+
+function getThread(session, id) {
+  if (!session.threadsById.has(id)) {
+    const thread = {
+      id,
+      threadId: id,
+      sessionId: session.id,
+      title: "",
+      cwd: "",
+      threadPreview: "",
+      turnsById: new Map(),
+      turns: [],
+      events: 0,
+      blocks: 0,
+      preview: "",
+      lastTs: 0,
+      source: "",
+      parentThreadId: "",
+      forkedFromId: "",
+      agentNickname: "",
+      agentRole: "",
+    };
+    session.threadsById.set(id, thread);
+    session.threads.push(thread);
+  }
+  return session.threadsById.get(id);
 }
 
 function buildThreadMetadata(events) {
@@ -633,33 +786,44 @@ function buildThreadMetadata(events) {
     if (directId && (event.threadName || event.threadPreview || event.threadCwd)) {
       mergeThreadMetadata(metadata, {
         id: directId,
+        sessionId: stringValue(event.sessionId),
         title: stringValue(event.threadName),
         preview: stringValue(event.threadPreview),
         cwd: stringValue(event.threadCwd),
         updatedAt: numericTimestamp(event.ts_ms),
       });
     }
+    mergeRawThreadMetadata(metadata, event.rawJson?.result?.thread);
     const data = event.rawJson?.result?.data;
     if (!Array.isArray(data)) continue;
     for (const item of data) {
-      if (!item || typeof item !== "object") continue;
-      const id = stringValue(item.id || item.threadId || item.thread_id);
-      if (!id) continue;
-      mergeThreadMetadata(metadata, {
-        id,
-        title: stringValue(item.name || item.title),
-        preview: stringValue(item.preview),
-        cwd: stringValue(item.cwd || item.path),
-        updatedAt: numericTimestamp(item.updatedAt ?? item.updated_at ?? item.recencyAt ?? item.recency_at ?? item.createdAt ?? item.created_at),
-      });
+      mergeRawThreadMetadata(metadata, item);
     }
   }
   return metadata;
 }
 
+function mergeRawThreadMetadata(metadata, item) {
+  if (!item || typeof item !== "object") return;
+  const id = stringValue(item.id || item.threadId || item.thread_id);
+  if (!id) return;
+  mergeThreadMetadata(metadata, {
+    id,
+    sessionId: stringValue(item.sessionId || item.session_id),
+    parentThreadId: stringValue(item.parentThreadId || item.parent_thread_id),
+    forkedFromId: stringValue(item.forkedFromId || item.forked_from_id),
+    agentNickname: stringValue(item.agentNickname || item.agent_nickname),
+    agentRole: stringValue(item.agentRole || item.agent_role),
+    title: stringValue(item.name || item.title),
+    preview: stringValue(item.preview),
+    cwd: stringValue(item.cwd || item.path),
+    updatedAt: numericTimestamp(item.updatedAt ?? item.updated_at ?? item.recencyAt ?? item.recency_at ?? item.createdAt ?? item.created_at),
+  });
+}
+
 function mergeThreadMetadata(metadata, next) {
-  if (!next.id || (!next.title && !next.preview && !next.cwd)) return;
-  const current = metadata.get(next.id) || { updatedAt: 0, title: "", preview: "", cwd: "" };
+  if (!next.id || (!next.title && !next.preview && !next.cwd && !next.sessionId)) return;
+  const current = metadata.get(next.id) || { updatedAt: 0, title: "", preview: "", cwd: "", sessionId: "", parentThreadId: "", forkedFromId: "", agentNickname: "", agentRole: "" };
   const newer = next.updatedAt >= current.updatedAt;
   const title = chooseMetadataText(current.title, next.title, newer);
   const preview = chooseMetadataText(current.preview, next.preview, newer);
@@ -669,6 +833,11 @@ function mergeThreadMetadata(metadata, next) {
     title,
     preview,
     cwd,
+    sessionId: next.sessionId || current.sessionId || next.id,
+    parentThreadId: next.parentThreadId || current.parentThreadId || "",
+    forkedFromId: next.forkedFromId || current.forkedFromId || "",
+    agentNickname: next.agentNickname || current.agentNickname || "",
+    agentRole: next.agentRole || current.agentRole || "",
   });
 }
 
@@ -679,11 +848,26 @@ function chooseMetadataText(current, next, newer) {
   return newer ? next : current;
 }
 
-function applySessionMetadata(session, metadata) {
+function applyThreadMetadata(thread, metadata) {
   if (!metadata) return;
-  if (metadata.title) session.title = metadata.title;
-  if (metadata.preview) session.threadPreview = metadata.preview;
-  if (metadata.cwd) session.cwd = metadata.cwd;
+  if (metadata.title) thread.title = metadata.title;
+  if (metadata.preview) thread.threadPreview = metadata.preview;
+  if (metadata.cwd) thread.cwd = metadata.cwd;
+  if (metadata.sessionId) thread.sessionId = metadata.sessionId;
+  if (metadata.parentThreadId) thread.parentThreadId = metadata.parentThreadId;
+  if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
+  if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
+  if (metadata.agentRole) thread.agentRole = metadata.agentRole;
+}
+
+function applySessionMetadata(session, thread) {
+  if (!thread) return;
+  const rootLike = thread.id === session.id || !thread.parentThreadId;
+  if (rootLike || !session.title) {
+    if (thread.title) session.title = thread.title;
+    if (thread.cwd) session.cwd = thread.cwd;
+  }
+  if (!session.preview && (thread.threadPreview || thread.preview)) session.preview = thread.threadPreview || thread.preview;
 }
 
 function mergeSourceLabel(current, next) {
@@ -691,10 +875,6 @@ function mergeSourceLabel(current, next) {
   if (!current) return value;
   if (current === value) return current;
   return "mixed";
-}
-
-function sessionTitle(session) {
-  return session.title || session.threadPreview || session.preview || `Session ${shortId(session.id)}`;
 }
 
 function stringValue(value) {
@@ -1081,7 +1261,7 @@ function renderTimeline() {
       <span class="source">${escapeHtml(sourceLabel(event.source))}</span>
       <span class="dir">${event.dir || ""}</span>
       <span class="method">${escapeHtml(methodLabel(event))}</span>
-      <span class="ids">${escapeHtml([shortId(event.threadId), shortId(event.turnId), shortId(event.itemId)].filter(Boolean).join(" / "))}</span>
+      <span class="ids">${escapeHtml([shortId(event.sessionId), shortId(event.threadId), shortId(event.turnId), shortId(event.itemId)].filter(Boolean).join(" / "))}</span>
       <span class="summary">${escapeHtml(truncateInline(event.summary || "", maxTimelineSummaryChars))}</span>
     `;
     row.addEventListener("click", () => selectEvent(event.viewId));
@@ -1209,6 +1389,7 @@ els.clearBtn.addEventListener("click", () => {
   state.conversationModel = { version: 0, sessions: [] };
   state.selectedSessionId = "";
   state.expandedSessionId = "";
+  state.selectedThreadId = "";
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
   closeDetail();

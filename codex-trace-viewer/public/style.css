@@ -317,6 +317,40 @@ h1 {
   text-align: center;
 }
 
+.turnThreadHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 2px 2px;
+  padding: 6px 4px 4px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--muted);
+}
+
+.turnThreadHeader:first-child {
+  margin-top: 0;
+  border-top: 0;
+}
+
+.turnThreadName,
+.turnThreadId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turnThreadName {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.turnThreadId {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+}
+
 .sessionTurnRow {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) auto;
@@ -384,6 +418,43 @@ h1 {
   scroll-padding-top: 16px;
   padding: 18px clamp(18px, 4vw, 56px) 36px;
   background: #ffffff;
+}
+
+.threadDivider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 960px);
+  margin: 18px auto 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: var(--muted);
+  padding: 8px 10px;
+  font-size: 12px;
+  scroll-margin-top: 18px;
+}
+
+.threadDivider span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadDivider span:first-child {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.threadDivider span:last-child {
+  font-family: Consolas, "SFMono-Regular", monospace;
+}
+
+.threadDivider.active {
+  border-color: rgba(15, 118, 110, 0.34);
+  background: var(--accent-soft);
 }
 
 .turnDivider {

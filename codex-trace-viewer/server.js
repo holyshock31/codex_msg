@@ -88,6 +88,7 @@ function normalizeLine(line) {
       raw: line,
       parseError: error.message,
       method: null,
+      sessionId: null,
       threadId: null,
       turnId: null,
       itemId: null,
@@ -111,9 +112,11 @@ function normalizeOuter(outer) {
 
   const params = rawJson?.params;
   const item = params?.item;
+  const thread = params?.thread || rawJson?.result?.thread || null;
   const method = rawJson?.method || null;
   const requestId = rawJson?.id == null ? null : String(rawJson.id);
-  const threadId = params?.threadId || params?.thread_id || item?.threadId || null;
+  const threadId = params?.threadId || params?.thread_id || item?.threadId || thread?.id || thread?.threadId || thread?.thread_id || null;
+  const sessionId = params?.sessionId || params?.session_id || thread?.sessionId || thread?.session_id || null;
   const turnId = params?.turnId || params?.turn_id || item?.turnId || null;
   const itemId = params?.itemId || params?.item_id || item?.id || null;
   const itemType = item?.type || null;
@@ -131,6 +134,7 @@ function normalizeOuter(outer) {
     codec: outer.codec || "",
     method,
     requestId,
+    sessionId,
     threadId,
     turnId,
     itemId,
@@ -167,12 +171,20 @@ function summarize({ outer, rawJson, rawParseError }) {
 function updateConversationStore(event) {
   const threadId = event.threadId || event.rawJson?.params?.threadId || event.rawJson?.params?.thread_id;
   if (!threadId) return;
+  const metadata = getThreadMetadata(threadId);
+  const sessionId = event.sessionId || metadata?.sessionId || threadId;
+  migrateConversationThread(threadId, sessionId);
 
-  const session = getConversationSession(threadId);
-  applyConversationSessionMetadata(session, getThreadMetadata(threadId));
+  const session = getConversationSession(sessionId);
+  const thread = getConversationThread(session, threadId);
+  applyConversationThreadMetadata(thread, metadata);
+  applyConversationSessionMetadata(session, thread);
   session.events += 1;
+  thread.events += 1;
   session.lastTs = Math.max(session.lastTs || 0, event.ts_ms || 0);
+  thread.lastTs = Math.max(thread.lastTs || 0, event.ts_ms || 0);
   session.source = mergeSourceLabel(session.source, event.source);
+  thread.source = mergeSourceLabel(thread.source, event.source);
 
   const extracted = extractConversationEvent(event);
   if (!extracted) {
@@ -182,20 +194,66 @@ function updateConversationStore(event) {
   }
 
   const turnId = extracted.turnId || event.turnId || "unknown-turn";
-  const turn = getConversationTurn(session, turnId);
+  const turn = getConversationTurn(thread, turnId);
   applyConversationTurnMeta(turn, event);
   if (extracted.block) {
     applyConversationBlock(turn, extracted.block, event);
+    if (!thread.preview && extracted.block.preview) thread.preview = extracted.block.preview;
     if (!session.preview && extracted.block.preview) session.preview = extracted.block.preview;
   }
   conversationVersion += 1;
   trimConversationSessions();
 }
 
+function migrateConversationThread(threadId, sessionId) {
+  if (!threadId || !sessionId || threadId === sessionId) return;
+  const fallbackSession = conversationSessions.get(threadId);
+  if (!fallbackSession?.threadsById?.has(threadId)) return;
+  const thread = fallbackSession.threadsById.get(threadId);
+  fallbackSession.threadsById.delete(threadId);
+  fallbackSession.threads = fallbackSession.threads.filter((candidate) => candidate.id !== threadId);
+  fallbackSession.events = fallbackSession.threads.reduce((sum, candidate) => sum + candidate.events, 0);
+  fallbackSession.lastTs = fallbackSession.threads.reduce((max, candidate) => Math.max(max, candidate.lastTs || 0), 0);
+  if (!fallbackSession.threads.length) {
+    conversationSessions.delete(threadId);
+  }
+
+  const targetSession = getConversationSession(sessionId);
+  if (targetSession.threadsById.has(threadId)) return;
+  thread.sessionId = sessionId;
+  targetSession.threadsById.set(threadId, thread);
+  targetSession.threads.push(thread);
+  targetSession.events += thread.events;
+  targetSession.lastTs = Math.max(targetSession.lastTs || 0, thread.lastTs || 0);
+  targetSession.source = mergeSourceLabel(targetSession.source, thread.source);
+  applyConversationSessionMetadata(targetSession, thread);
+}
+
 function getConversationSession(id) {
   if (!conversationSessions.has(id)) {
     conversationSessions.set(id, {
       id,
+      title: "",
+      cwd: "",
+      preview: "",
+      threadsById: new Map(),
+      threads: [],
+      events: 0,
+      blocks: 0,
+      turnCount: 0,
+      threadCount: 0,
+      lastTs: 0,
+      source: "",
+    });
+  }
+  return conversationSessions.get(id);
+}
+
+function getConversationThread(session, id) {
+  if (!session.threadsById.has(id)) {
+    const thread = {
+      id,
+      sessionId: session.id,
       title: "",
       cwd: "",
       threadPreview: "",
@@ -206,16 +264,39 @@ function getConversationSession(id) {
       preview: "",
       lastTs: 0,
       source: "",
-    });
+      parentThreadId: "",
+      forkedFromId: "",
+      agentNickname: "",
+      agentRole: "",
+    };
+    session.threadsById.set(id, thread);
+    session.threads.push(thread);
   }
-  return conversationSessions.get(id);
+  return session.threadsById.get(id);
 }
 
-function applyConversationSessionMetadata(session, metadata) {
+function applyConversationThreadMetadata(thread, metadata) {
   if (!metadata) return;
-  if (metadata.title) session.title = metadata.title;
-  if (metadata.preview) session.threadPreview = metadata.preview;
-  if (metadata.cwd) session.cwd = metadata.cwd;
+  if (metadata.title) thread.title = metadata.title;
+  if (metadata.preview) thread.threadPreview = metadata.preview;
+  if (metadata.cwd) thread.cwd = metadata.cwd;
+  if (metadata.sessionId) thread.sessionId = metadata.sessionId;
+  if (metadata.parentThreadId) thread.parentThreadId = metadata.parentThreadId;
+  if (metadata.forkedFromId) thread.forkedFromId = metadata.forkedFromId;
+  if (metadata.agentNickname) thread.agentNickname = metadata.agentNickname;
+  if (metadata.agentRole) thread.agentRole = metadata.agentRole;
+}
+
+function applyConversationSessionMetadata(session, thread) {
+  if (!thread) return;
+  const rootLike = thread.id === session.id || !thread.parentThreadId;
+  if (rootLike || !session.title) {
+    if (thread.title) session.title = thread.title;
+    if (thread.cwd) session.cwd = thread.cwd;
+  }
+  if (!session.preview && (thread.threadPreview || thread.preview)) {
+    session.preview = thread.threadPreview || thread.preview;
+  }
 }
 
 function mergeSourceLabel(current, next) {
@@ -638,20 +719,49 @@ function conversationModel() {
 }
 
 function serializeConversationSession(session) {
-  applyConversationSessionMetadata(session, getThreadMetadata(session.id));
-  const turns = session.turns.map(serializeConversationTurn).sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
-  const blocks = turns.reduce((sum, turn) => sum + turn.blocks.length, 0);
+  const threads = session.threads.map(serializeConversationThread).sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+  const blocks = threads.reduce((sum, thread) => sum + thread.blocks, 0);
+  const turnCount = threads.reduce((sum, thread) => sum + thread.turns.length, 0);
   session.blocks = blocks;
+  session.turnCount = turnCount;
+  session.threadCount = threads.length;
   return {
     id: session.id,
+    sessionId: session.id,
     title: session.title,
     cwd: session.cwd,
-    threadPreview: session.threadPreview,
     preview: session.preview,
     events: session.events,
     blocks,
+    turnCount,
+    threadCount: threads.length,
     lastTs: session.lastTs,
     source: session.source || "local",
+    threads,
+  };
+}
+
+function serializeConversationThread(thread) {
+  applyConversationThreadMetadata(thread, getThreadMetadata(thread.id));
+  const turns = thread.turns.map(serializeConversationTurn).sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
+  const blocks = turns.reduce((sum, turn) => sum + turn.blocks.length, 0);
+  thread.blocks = blocks;
+  return {
+    id: thread.id,
+    threadId: thread.id,
+    sessionId: thread.sessionId,
+    title: thread.title,
+    cwd: thread.cwd,
+    threadPreview: thread.threadPreview,
+    preview: thread.preview,
+    events: thread.events,
+    blocks,
+    lastTs: thread.lastTs,
+    source: thread.source || "local",
+    parentThreadId: thread.parentThreadId,
+    forkedFromId: thread.forkedFromId,
+    agentNickname: thread.agentNickname,
+    agentRole: thread.agentRole,
     turns,
   };
 }
@@ -695,6 +805,7 @@ function compactEvent(event) {
     codec: event.codec || "",
     method: event.method || null,
     requestId: event.requestId || null,
+    sessionId: event.sessionId || metadata?.sessionId || null,
     threadId: event.threadId || null,
     turnId: event.turnId || null,
     itemId: event.itemId || null,
@@ -726,6 +837,8 @@ function compactParams(params) {
   if (!params || typeof params !== "object") return params ?? null;
   const out = {};
   for (const key of [
+    "sessionId",
+    "session_id",
     "threadId",
     "thread_id",
     "parentThreadId",
@@ -778,6 +891,9 @@ function compactItem(item) {
 
 function compactResult(result) {
   if (!result || typeof result !== "object") return compactValue(result);
+  if (result.thread && typeof result.thread === "object") {
+    return { thread: compactThreadRecord(result.thread) || compactValue(result.thread) };
+  }
   if (Array.isArray(result.data)) {
     const threadRows = result.data.map(compactThreadRecord).filter(Boolean);
     if (threadRows.length) {
@@ -797,13 +913,19 @@ function compactResult(result) {
 
 function compactThreadRecord(item) {
   if (!item || typeof item !== "object") return null;
-  const id = stringValue(item.id || item.threadId || item.thread_id || item.sessionId || item.session_id);
+  const id = stringValue(item.id || item.threadId || item.thread_id);
+  const sessionId = stringValue(item.sessionId || item.session_id);
   const title = stringValue(item.name || item.title || item.thread_name);
   const preview = stringValue(item.preview);
   const cwd = stringValue(item.cwd || item.path);
-  if (!id || (!title && !preview && !cwd)) return null;
+  if (!id || (!title && !preview && !cwd && !sessionId)) return null;
   return {
     id,
+    sessionId,
+    parentThreadId: stringValue(item.parentThreadId || item.parent_thread_id),
+    forkedFromId: stringValue(item.forkedFromId || item.forked_from_id),
+    agentNickname: stringValue(item.agentNickname || item.agent_nickname),
+    agentRole: stringValue(item.agentRole || item.agent_role),
     name: title,
     title,
     preview,
@@ -843,6 +965,7 @@ function updateThreadMetadataFromEvent(event) {
   if (Array.isArray(data)) {
     for (const item of data) mergeThreadMetadata(compactThreadRecord(item), "trace");
   }
+  mergeThreadMetadata(compactThreadRecord(rawJson?.result?.thread), "trace");
   mergeThreadMetadata(compactThreadRecord(rawJson?.params?.thread), "trace");
 }
 
@@ -854,6 +977,11 @@ function mergeThreadMetadata(record, source) {
     title: "",
     preview: "",
     cwd: "",
+    sessionId: "",
+    parentThreadId: "",
+    forkedFromId: "",
+    agentNickname: "",
+    agentRole: "",
     updatedAt: 0,
     source: "",
   };
@@ -863,6 +991,11 @@ function mergeThreadMetadata(record, source) {
     title: record.name && (newer || !current.title) ? record.name : current.title,
     preview: record.preview && (newer || !current.preview) ? record.preview : current.preview,
     cwd: record.cwd && (newer || !current.cwd) ? record.cwd : current.cwd,
+    sessionId: record.sessionId || current.sessionId || record.id,
+    parentThreadId: record.parentThreadId || current.parentThreadId || "",
+    forkedFromId: record.forkedFromId || current.forkedFromId || "",
+    agentNickname: record.agentNickname || current.agentNickname || "",
+    agentRole: record.agentRole || current.agentRole || "",
     updatedAt: Math.max(current.updatedAt, updatedAt),
     source: source || current.source,
   });
@@ -886,6 +1019,7 @@ async function refreshSessionIndexMetadata() {
         mergeThreadMetadata(
           compactThreadRecord({
             id: row.id,
+            sessionId: row.sessionId || row.session_id,
             name: row.thread_name || row.name || row.title,
             preview: row.preview,
             cwd: row.cwd || row.path,
@@ -1050,6 +1184,7 @@ function startIngestServer() {
             raw: line,
             parseError: error.message,
             method: null,
+            sessionId: null,
             threadId: null,
             turnId: null,
             itemId: null,
