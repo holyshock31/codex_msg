@@ -159,6 +159,7 @@ function renderSessionsAndConversation() {
   renderSessionList(model.sessions);
   const selected = model.sessions.find((session) => session.id === state.selectedSessionId);
   const expanded = model.sessions.find((session) => session.id === state.expandedSessionId);
+  if (selected) ensureSelectedThread(selected);
   renderTurnOverlay(expanded);
   renderConversation(selected);
 }
@@ -301,12 +302,20 @@ function renderTurnOverlay(session) {
 
   const fragment = document.createDocumentFragment();
   threads.forEach((threadModel) => {
-    const threadHeader = document.createElement("div");
+    const threadHeader = document.createElement("button");
+    threadHeader.type = "button";
     threadHeader.className = "turnThreadHeader";
+    if (threadModel.id === state.selectedThreadId) threadHeader.classList.add("active");
+    threadHeader.dataset.threadId = threadModel.id;
+    threadHeader.title = `${threadTitle(threadModel)}\n${threadModel.id}`;
     threadHeader.innerHTML = `
       <span class="turnThreadName">${escapeHtml(threadTitle(threadModel))}</span>
       <span class="turnThreadId">${escapeHtml(shortId(threadModel.id))}</span>
     `;
+    threadHeader.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectThread(threadModel.id);
+    });
     fragment.appendChild(threadHeader);
     threadModel.turns.forEach((turn, index) => {
       const button = document.createElement("button");
@@ -345,18 +354,33 @@ function renderConversation(session) {
     return;
   }
 
+  const selectedThread = ensureSelectedThread(session);
   if (state.selectedTurnId && !findTurnInSession(session, state.selectedThreadId, state.selectedTurnId)) {
-    state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
   }
 
-  els.conversationTitle.textContent = sessionTitle(session);
-  els.conversationMeta.textContent = [sourceLabel(session.source), `session ${session.id}`, session.cwd, `${sessionThreads(session).length} threads`, `${countTurns(session)} turns`, `${session.blocks} blocks`].filter(Boolean).join(" / ");
+  const activeThread = selectedThread || ensureSelectedThread(session);
+  const activeThreadBlocks = activeThread ? countThreadBlocks(activeThread) : 0;
+  const rawSession = activeThread?.sessionId && activeThread.sessionId !== session.id ? `raw session ${activeThread.sessionId}` : "";
+  const parent = activeThread?.parentThreadId ? `parent ${activeThread.parentThreadId}` : "";
+
+  els.conversationTitle.textContent = activeThread ? threadTitle(activeThread) : sessionTitle(session);
+  els.conversationMeta.textContent = [
+    sourceLabel(activeThread?.source || session.source),
+    `session ${session.id}`,
+    activeThread ? `thread ${activeThread.id}` : "",
+    rawSession,
+    parent,
+    session.cwd,
+    activeThread ? `${activeThread.turns.length} turns` : `${countTurns(session)} turns`,
+    `${activeThreadBlocks || session.blocks} blocks`,
+  ].filter(Boolean).join(" / ");
 
   els.conversationMessages.innerHTML = "";
   const fragment = document.createDocumentFragment();
-  for (const threadModel of sessionThreads(session)) {
+  const visibleThreads = activeThread ? [activeThread] : [];
+  for (const threadModel of visibleThreads) {
     fragment.appendChild(threadDivider(threadModel));
     for (const turn of threadModel.turns) {
       fragment.appendChild(turnDivider(threadModel, turn));
@@ -366,7 +390,7 @@ function renderConversation(session) {
     }
   }
   if (!fragment.childNodes.length) {
-    els.conversationMessages.innerHTML = `<div class="emptyState">No blocks in this turn.</div>`;
+    els.conversationMessages.innerHTML = `<div class="emptyState">No blocks for the selected agent.</div>`;
   } else {
     els.conversationMessages.appendChild(fragment);
   }
@@ -410,18 +434,21 @@ function turnLabel(turn, index) {
   return displayPreview(first) || first?.label || `Turn ${index + 1}`;
 }
 
+function selectThread(threadId) {
+  state.selectedThreadId = threadId;
+  state.selectedTurnId = "";
+  state.selectedSegmentKey = "";
+  render();
+}
+
 function selectTurn(threadId, turnId) {
   state.selectedThreadId = threadId;
   state.selectedTurnId = turnId;
   state.selectedSegmentKey = "";
-  for (const divider of document.querySelectorAll(".turnDivider.active")) {
-    divider.classList.remove("active");
-  }
-  const target = document.querySelector(`#turn-${cssSafeId(threadId)}-${cssSafeId(turnId)}`);
-  target?.classList.add("active");
-  target?.scrollIntoView({ behavior: "smooth", block: "start" });
-  renderSegmentsActiveState();
-  renderSegmentDetail(null);
+  render();
+  requestAnimationFrame(() => {
+    document.querySelector(`#turn-${cssSafeId(threadId)}-${cssSafeId(turnId)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 function cssSafeId(value) {
@@ -618,6 +645,26 @@ function countTurns(session) {
   return sessionThreads(session).reduce((sum, thread) => sum + (thread.turns?.length || 0), 0);
 }
 
+function countThreadBlocks(thread) {
+  return (thread?.turns || []).reduce((sum, turn) => sum + (turn.blocks?.length || 0), 0);
+}
+
+function ensureSelectedThread(session) {
+  const threads = sessionThreads(session);
+  if (!threads.length) {
+    state.selectedThreadId = "";
+    state.selectedTurnId = "";
+    state.selectedSegmentKey = "";
+    return null;
+  }
+  const selected = state.selectedThreadId ? threads.find((thread) => thread.id === state.selectedThreadId) : null;
+  if (selected) return selected;
+  state.selectedThreadId = threads[0].id;
+  state.selectedTurnId = "";
+  state.selectedSegmentKey = "";
+  return threads[0];
+}
+
 function findTurnInSession(session, threadId, turnId) {
   return sessionThreads(session).some((thread) => {
     if (threadId && thread.id !== threadId) return false;
@@ -630,9 +677,18 @@ function sessionTitle(session) {
 }
 
 function threadTitle(thread) {
-  const role = thread.agentRole || thread.agentNickname || "";
-  const base = thread.title || thread.threadPreview || thread.preview || `Thread ${shortId(thread.id)}`;
-  return role ? `${base} (${role})` : base;
+  const subject = thread.title || thread.threadPreview || thread.preview || `Thread ${shortId(thread.id)}`;
+  const agent = agentLabel(thread);
+  return subject ? `${agent} · ${subject}` : agent;
+}
+
+function agentLabel(thread) {
+  const nickname = thread.agentNickname || "";
+  const role = thread.agentRole || "";
+  if (nickname && role) return `${nickname} (${role})`;
+  if (nickname) return nickname;
+  if (role) return role;
+  return thread.parentThreadId ? "subagent" : "main agent";
 }
 
 function truncateForDisplay(value) {

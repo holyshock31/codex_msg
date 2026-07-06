@@ -322,15 +322,31 @@ h1 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+  width: 100%;
   margin: 8px 2px 2px;
   padding: 6px 4px 4px;
+  border: 0;
   border-top: 1px solid var(--border-soft);
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
+  text-align: left;
 }
 
 .turnThreadHeader:first-child {
   margin-top: 0;
   border-top: 0;
+}
+
+.turnThreadHeader:hover,
+.turnThreadHeader.active {
+  color: var(--text);
+}
+
+.turnThreadHeader.active {
+  background: var(--accent-soft);
+  border-radius: 7px;
+  padding: 6px 6px 4px;
 }
 
 .turnThreadName,
