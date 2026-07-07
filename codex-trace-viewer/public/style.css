@@ -191,6 +191,22 @@ h1 {
   cursor: col-resize;
 }
 
+.splitterGhost {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  background: rgba(15, 118, 110, 0.42);
+  will-change: transform;
+}
+
+.splitterGhost-x {
+  cursor: col-resize;
+}
+
+.splitterGhost-y {
+  cursor: row-resize;
+}
+
 .splitterHorizontal {
   display: none;
   height: 6px;

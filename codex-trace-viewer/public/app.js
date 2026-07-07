@@ -698,43 +698,97 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function setSessionPaneWidth(width) {
-  const rect = els.conversationView.getBoundingClientRect();
-  const max = Math.max(260, rect.width - 420);
-  const next = clamp(width, 240, max);
-  document.documentElement.style.setProperty("--session-pane-width", `${Math.round(next)}px`);
+function sessionPaneWidthBounds(rect = els.conversationView.getBoundingClientRect()) {
+  return { min: 240, max: Math.max(260, rect.width - 420) };
 }
 
-function setSegmentDetailHeight(height) {
-  const rect = els.chatShell.getBoundingClientRect();
-  const max = Math.max(180, rect.height - 180);
-  const next = clamp(height, 180, max);
+function setSessionPaneWidth(width, bounds = sessionPaneWidthBounds()) {
+  const next = clamp(width, bounds.min, bounds.max);
+  document.documentElement.style.setProperty("--session-pane-width", `${Math.round(next)}px`);
+  return next;
+}
+
+function segmentDetailHeightBounds(rect = els.chatShell.getBoundingClientRect()) {
+  return { min: 180, max: Math.max(180, rect.height - 180) };
+}
+
+function setSegmentDetailHeight(height, bounds = segmentDetailHeightBounds()) {
+  const next = clamp(height, bounds.min, bounds.max);
   document.documentElement.style.setProperty("--segment-detail-height", `${Math.round(next)}px`);
+  return next;
 }
 
 function initSplitters() {
   initPointerResize(els.conversationSplitter, {
+    axis: "x",
     bodyClass: "resizingVertical",
-    onMove: (event) => {
-      const rect = els.conversationView.getBoundingClientRect();
-      setSessionPaneWidth(event.clientX - rect.left);
+    createDrag: () => {
+      const viewRect = els.conversationView.getBoundingClientRect();
+      const handleRect = els.conversationSplitter.getBoundingClientRect();
+      const bounds = sessionPaneWidthBounds(viewRect);
+      const initialValue = clamp(handleRect.left - viewRect.left, bounds.min, bounds.max);
+      return {
+        initialValue,
+        ghostRect: {
+          height: viewRect.height,
+          left: viewRect.left + initialValue,
+          top: viewRect.top,
+          width: handleRect.width || 6,
+        },
+        valueFromEvent: (event) => clamp(event.clientX - viewRect.left, bounds.min, bounds.max),
+        commit: (value) => setSessionPaneWidth(value, bounds),
+      };
     },
   });
 
   initPointerResize(els.detailSplitter, {
+    axis: "y",
     bodyClass: "resizingHorizontal",
-    onMove: (event) => {
-      const rect = els.chatShell.getBoundingClientRect();
-      setSegmentDetailHeight(rect.bottom - event.clientY);
+    createDrag: () => {
+      const shellRect = els.chatShell.getBoundingClientRect();
+      const handleRect = els.detailSplitter.getBoundingClientRect();
+      const bounds = segmentDetailHeightBounds(shellRect);
+      const cssHeight = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--segment-detail-height"));
+      const initialValue = clamp(Number.isFinite(cssHeight) ? cssHeight : shellRect.bottom - handleRect.bottom, bounds.min, bounds.max);
+      return {
+        initialValue,
+        ghostRect: {
+          height: handleRect.height || 6,
+          left: shellRect.left,
+          top: shellRect.bottom - initialValue - (handleRect.height || 6),
+          width: shellRect.width,
+        },
+        valueFromEvent: (event) => clamp(shellRect.bottom - event.clientY, bounds.min, bounds.max),
+        commit: (value) => setSegmentDetailHeight(value, bounds),
+      };
     },
   });
 }
 
-function initPointerResize(handle, { bodyClass, onMove }) {
+function initPointerResize(handle, { axis, bodyClass, createDrag }) {
   if (!handle) return;
   handle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    const drag = createDrag(event);
+    if (!drag) return;
+    const ghost = createSplitterGhost(axis, drag.ghostRect);
+    let latestValue = drag.initialValue;
+    let latestEvent = event;
+    let frame = 0;
+
+    const updateGhost = () => {
+      frame = 0;
+      latestValue = drag.valueFromEvent(latestEvent);
+      const delta = latestValue - drag.initialValue;
+      ghost.style.transform = axis === "x" ? `translate3d(${Math.round(delta)}px, 0, 0)` : `translate3d(0, ${Math.round(-delta)}px, 0)`;
+    };
+
+    const scheduleGhostUpdate = (moveEvent) => {
+      latestEvent = moveEvent;
+      if (!frame) frame = requestAnimationFrame(updateGhost);
+    };
+
     handle.classList.add("dragging");
     document.body.classList.add("resizing");
     if (bodyClass) document.body.classList.add(bodyClass);
@@ -742,12 +796,22 @@ function initPointerResize(handle, { bodyClass, onMove }) {
 
     const move = (moveEvent) => {
       moveEvent.preventDefault();
-      onMove(moveEvent);
+      scheduleGhostUpdate(moveEvent);
     };
-    const end = () => {
+    const end = (endEvent) => {
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      if (endEvent.type !== "pointercancel") {
+        latestValue = drag.valueFromEvent(endEvent);
+        drag.commit(latestValue);
+      }
+      ghost.remove();
       handle.classList.remove("dragging");
       document.body.classList.remove("resizing");
       if (bodyClass) document.body.classList.remove(bodyClass);
+      if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
@@ -757,6 +821,17 @@ function initPointerResize(handle, { bodyClass, onMove }) {
     window.addEventListener("pointerup", end);
     window.addEventListener("pointercancel", end);
   });
+}
+
+function createSplitterGhost(axis, rect) {
+  const ghost = document.createElement("div");
+  ghost.className = `splitterGhost splitterGhost-${axis}`;
+  ghost.style.left = `${Math.round(rect.left)}px`;
+  ghost.style.top = `${Math.round(rect.top)}px`;
+  ghost.style.width = `${Math.round(rect.width)}px`;
+  ghost.style.height = `${Math.round(rect.height)}px`;
+  document.body.appendChild(ghost);
+  return ghost;
 }
 
 function sessionThreads(session) {
