@@ -14,6 +14,7 @@
       </div>
       <div class="actions">
         <button id="conversationTabBtn" class="tabButton active" type="button">Conversation</button>
+        <button id="tokensTabBtn" class="tabButton" type="button">Tokens</button>
         <button id="timelineTabBtn" class="tabButton" type="button">Timeline</button>
         <button id="pauseBtn" type="button">Pause</button>
         <button id="clearBtn" type="button">Clear View</button>
@@ -98,7 +99,10 @@
           </div>
         </div>
         <div class="chatShell">
-          <div id="conversationMessages" class="conversationMessages"></div>
+          <div class="messagesFrame">
+            <div id="conversationMessages" class="conversationMessages"></div>
+            <nav id="segmentRail" class="segmentRail" aria-label="Current turn segments"></nav>
+          </div>
           <div id="detailSplitter" class="splitter splitterHorizontal" role="separator" aria-orientation="horizontal" aria-label="Resize segment detail"></div>
           <aside id="segmentDetail" class="segmentDetail" aria-live="polite">
             <div class="segmentDetailHeader">
@@ -122,11 +126,77 @@
       </section>
     </main>
 
+    <main id="tokensView" class="tokensView hidden">
+      <section class="tokensHeader">
+        <div>
+          <div class="tokensTitle">Token Analysis</div>
+          <div id="tokensMeta" class="tokensMeta">Loading token usage...</div>
+        </div>
+        <button id="refreshTokensBtn" type="button">Refresh</button>
+      </section>
+      <section class="tokenSummaryGrid" aria-label="Token usage summary">
+        <div class="tokenMetric">
+          <span>Total</span>
+          <strong id="tokenTotalValue">--</strong>
+        </div>
+        <div class="tokenMetric">
+          <span>Input</span>
+          <strong id="tokenInputValue">--</strong>
+        </div>
+        <div class="tokenMetric">
+          <span>Cached input</span>
+          <strong id="tokenCachedValue">--</strong>
+        </div>
+        <div class="tokenMetric">
+          <span>Output</span>
+          <strong id="tokenOutputValue">--</strong>
+        </div>
+        <div class="tokenMetric">
+          <span>Reasoning</span>
+          <strong id="tokenReasoningValue">--</strong>
+        </div>
+        <div class="tokenMetric">
+          <span>Context</span>
+          <strong id="tokenContextValue">--</strong>
+        </div>
+      </section>
+      <section class="tokenTables">
+        <article class="tokenTablePanel">
+          <div class="tokenTableHeader">
+            <div>
+              <div class="tokenTableTitle">Top threads</div>
+              <div class="tokenTableSub">latest cumulative totals per thread</div>
+            </div>
+          </div>
+          <div id="tokenThreadsTable" class="tokenTable"></div>
+        </article>
+        <article class="tokenTablePanel">
+          <div class="tokenTableHeader">
+            <div>
+              <div class="tokenTableTitle">Top turns</div>
+              <div class="tokenTableSub">latest model call per turn</div>
+            </div>
+          </div>
+          <div id="tokenTurnsTable" class="tokenTable"></div>
+        </article>
+      </section>
+    </main>
+
     <main id="timelineView" class="layout hidden">
       <section class="timeline">
         <div class="listHeader">
           <span id="countLine">0 events</span>
           <span id="liveLine">live</span>
+        </div>
+        <div class="eventTableHeader" aria-hidden="true">
+          <span>Seq</span>
+          <span>Time</span>
+          <span>Source</span>
+          <span>Direction</span>
+          <span>Method</span>
+          <span>Item</span>
+          <span>Ids</span>
+          <span>Summary</span>
         </div>
         <div id="eventList" class="eventList"></div>
       </section>

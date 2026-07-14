@@ -43,6 +43,8 @@ const STORAGE_PRELOAD_ENABLED = (process.env.CODEX_TRACE_STORAGE_PRELOAD || "tru
 const STORAGE_PRELOAD_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_BYTES || String(512 * 1024 * 1024));
 const STORAGE_PRELOAD_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_EVENTS || "100000");
 const STORAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_STORAGE_SCAN_CACHE_MS || "5000");
+const TOKEN_USAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_TOKEN_USAGE_SCAN_CACHE_MS || "30000");
+const TOKEN_USAGE_TOP_LIMIT = Number(process.env.CODEX_TRACE_TOKEN_USAGE_TOP_LIMIT || "50");
 const TEMPORARY_SESSION_ID = "__codex_trace_temporary_sessions__";
 const TEMPORARY_SESSION_TITLE = "临时会话";
 
@@ -81,6 +83,7 @@ const storageState = {
   lastError: "",
   writeDeltaSinceScan: 0,
   scanCache: null,
+  tokenUsageScanCache: null,
 };
 
 function pushEvent(event, options = {}) {
@@ -350,6 +353,12 @@ function updateConversationStore(event) {
   thread.source = mergeSourceLabel(thread.source, event.source);
 
   const extracted = extractConversationEvent(event);
+  if (!extracted && isTokenUsageEvent(event)) {
+    applyConversationTokenUsage(thread, event);
+  }
+  if (!extracted && isTurnLifecycleEvent(event)) {
+    applyConversationTurnLifecycle(thread, event);
+  }
   if (!extracted) {
     conversationVersion += 1;
     trimConversationSessions();
@@ -456,6 +465,7 @@ function getConversationThread(session, id) {
       threadPreview: "",
       turnsById: new Map(),
       turns: [],
+      pendingTokenUsageByTurnId: new Map(),
       events: 0,
       blocks: 0,
       preview: "",
@@ -509,11 +519,42 @@ function mergeSourceLabel(current, next) {
 
 function getConversationTurn(session, id) {
   if (!session.turnsById.has(id)) {
-    const turn = { id, blocksByKey: new Map(), blocks: [], firstTs: 0, status: "", durationMs: null };
+    const turn = {
+      id,
+      blocksByKey: new Map(),
+      blocks: [],
+      firstTs: 0,
+      status: "",
+      durationMs: null,
+      startedAt: null,
+      completedAt: null,
+      startedTs: 0,
+      completedTs: 0,
+      startedSeq: null,
+      completedSeq: null,
+      error: null,
+    };
     session.turnsById.set(id, turn);
     session.turns.push(turn);
+    const pendingTokenUsage = session.pendingTokenUsageByTurnId?.get(id);
+    if (pendingTokenUsage) {
+      turn.tokenUsage = pendingTokenUsage;
+      session.pendingTokenUsageByTurnId.delete(id);
+    }
   }
   return session.turnsById.get(id);
+}
+
+function isTurnLifecycleEvent(event) {
+  const method = event.method || event.rawJson?.method;
+  return (method === "turn/started" || method === "turn/completed") && Boolean(event.rawJson?.params?.turn?.id);
+}
+
+function applyConversationTurnLifecycle(thread, event) {
+  const turnId = event.rawJson?.params?.turn?.id;
+  if (!turnId) return;
+  const turn = getConversationTurn(thread, turnId);
+  applyConversationTurnMeta(turn, event);
 }
 
 function applyConversationTurnMeta(turn, event) {
@@ -522,10 +563,57 @@ function applyConversationTurnMeta(turn, event) {
   const method = raw?.method;
   const ts = event.ts_ms || 0;
   turn.firstTs = turn.firstTs ? Math.min(turn.firstTs, ts) : ts;
-  if ((method === "turn/started" || method === "turn/completed") && params?.turn) {
-    turn.status = params.turn.status || turn.status;
-    turn.durationMs = params.turn.durationMs ?? turn.durationMs;
+  const lifecycle = params?.turn;
+  if (method === "turn/started" && lifecycle) {
+    turn.status = lifecycle.status || turn.status;
+    turn.startedAt = lifecycle.startedAt ?? turn.startedAt;
+    turn.completedAt = lifecycle.completedAt ?? turn.completedAt;
+    turn.startedTs = ts || turn.startedTs;
+    turn.startedSeq = event.seq ?? turn.startedSeq;
+    turn.durationMs = lifecycle.durationMs ?? turn.durationMs;
+    turn.error = lifecycle.error ?? turn.error;
   }
+  if (method === "turn/completed" && lifecycle) {
+    turn.status = lifecycle.status || turn.status;
+    turn.startedAt = lifecycle.startedAt ?? turn.startedAt;
+    turn.completedAt = lifecycle.completedAt ?? turn.completedAt;
+    turn.completedTs = ts || turn.completedTs;
+    turn.completedSeq = event.seq ?? turn.completedSeq;
+    turn.durationMs = lifecycle.durationMs ?? turn.durationMs;
+    turn.error = lifecycle.error ?? turn.error;
+  }
+}
+
+function applyConversationTokenUsage(thread, event) {
+  const params = event.rawJson?.params || {};
+  const usage = params.tokenUsage;
+  const turnId = event.turnId || params.turnId;
+  if (!usage || !turnId) return;
+  const ts = Number(event.ts_ms) || 0;
+  const nextTokenUsage = normalizeConversationTokenUsage(usage, ts);
+  if (!thread.turnsById.has(turnId)) {
+    const pending = thread.pendingTokenUsageByTurnId?.get(turnId);
+    if (!pending || !ts || pending.ts <= ts) {
+      thread.pendingTokenUsageByTurnId?.set(turnId, nextTokenUsage);
+    }
+    return;
+  }
+  const turn = thread.turnsById.get(turnId);
+  if (turn.tokenUsage && ts && turn.tokenUsage.ts > ts) return;
+  turn.tokenUsage = nextTokenUsage;
+}
+
+function isTokenUsageEvent(event) {
+  return event.method === "thread/tokenUsage/updated" || event.rawJson?.method === "thread/tokenUsage/updated";
+}
+
+function normalizeConversationTokenUsage(usage, ts = 0) {
+  return {
+    ts,
+    total: normalizeTokenUsageTotals(usage?.total),
+    last: normalizeTokenUsageTotals(usage?.last),
+    modelContextWindow: Number(usage?.modelContextWindow) || 0,
+  };
 }
 
 function extractConversationEvent(event) {
@@ -722,6 +810,23 @@ function extractConversationEvent(event) {
       },
     };
   }
+  if (item.type === "webSearch") {
+    const detail = webSearchDetail(item);
+    return {
+      turnId,
+      block: {
+        ...base,
+        kind: "webSearch",
+        role: "tool",
+        label: "webSearch",
+        meta: webSearchActionType(item.action) || item.status || "webSearch",
+        query: item.query,
+        action: item.action,
+        text: detail,
+        preview: webSearchPreview(item, detail),
+      },
+    };
+  }
   if (item.type === "fileChange") {
     return {
       turnId,
@@ -758,10 +863,10 @@ function extractConversationEvent(event) {
         ...base,
         kind: "system",
         role: "system",
-        label: "compaction",
+        label: "context compact",
         meta: "contextCompaction",
-        text: item.id || "context compaction",
-        preview: "context compaction",
+        text: "Conversation context was compacted.",
+        preview: "Context compacted",
       },
     };
   }
@@ -808,7 +913,7 @@ function applyConversationBlock(turn, update, event) {
   block.status = update.status ?? block.status;
   block.exitCode = update.exitCode ?? block.exitCode;
   block.durationMs = update.durationMs ?? block.durationMs;
-  for (const field of ["label", "role", "kind", "command", "cwd", "server", "tool", "argumentsText", "resultText", "error", "changes", "plan", "diff", "revisedPrompt", "savedPath"]) {
+  for (const field of ["label", "role", "kind", "command", "cwd", "server", "tool", "argumentsText", "resultText", "error", "changes", "plan", "diff", "revisedPrompt", "savedPath", "itemType", "query", "action"]) {
     if (update[field] != null && update[field] !== "") block[field] = update[field];
   }
   if (update.appendText) {
@@ -893,6 +998,30 @@ function reasoningText(item) {
   const summary = Array.isArray(item.summary) ? item.summary.map((part) => part.text || part).join("\n") : "";
   const content = Array.isArray(item.content) ? item.content.map((part) => part.text || part).join("\n") : "";
   return [summary, content].filter(Boolean).join("\n\n");
+}
+
+function webSearchActionType(action) {
+  return typeof action?.type === "string" ? action.type : "";
+}
+
+function webSearchDetail(item) {
+  const action = item?.action || {};
+  const actionType = webSearchActionType(action) || "webSearch";
+  const lines = [actionType];
+  if (item?.query) lines.push(`query: ${item.query}`);
+  if (action.query && action.query !== item?.query) lines.push(`action query: ${action.query}`);
+  if (Array.isArray(action.queries) && action.queries.length) {
+    lines.push("queries:");
+    for (const query of action.queries) lines.push(`- ${query}`);
+  }
+  if (action.url) lines.push(`url: ${action.url}`);
+  if (action.pattern) lines.push(`pattern: ${action.pattern}`);
+  return lines.join("\n");
+}
+
+function webSearchPreview(item, detail) {
+  const action = item?.action || {};
+  return action.url || action.query || item?.query || detail || "webSearch";
 }
 
 function stringifyCompact(value) {
@@ -1039,6 +1168,14 @@ function serializeConversationTurn(turn) {
     firstTs: turn.firstTs,
     status: turn.status,
     durationMs: turn.durationMs,
+    startedAt: turn.startedAt ?? null,
+    completedAt: turn.completedAt ?? null,
+    startedTs: turn.startedTs || 0,
+    completedTs: turn.completedTs || 0,
+    startedSeq: turn.startedSeq ?? null,
+    completedSeq: turn.completedSeq ?? null,
+    error: turn.error ?? null,
+    tokenUsage: turn.tokenUsage || null,
     blocks,
   };
 }
@@ -1494,6 +1631,200 @@ function publicSegmentInfo(file) {
   };
 }
 
+async function tokenUsageStats({ force = false } = {}) {
+  const now = Date.now();
+  if (
+    !force &&
+    storageState.tokenUsageScanCache &&
+    now - storageState.tokenUsageScanCache.scannedAt < TOKEN_USAGE_SCAN_CACHE_MS &&
+    storageState.writeDeltaSinceScan < STORAGE_BATCH_BYTES
+  ) {
+    return storageState.tokenUsageScanCache;
+  }
+
+  const result = createTokenUsageAccumulator(now);
+  if (!STORAGE_ENABLED) {
+    result.enabled = false;
+    storageState.tokenUsageScanCache = result;
+    return result;
+  }
+
+  try {
+    const files = await listStorageSegmentFiles();
+    result.segmentCount = files.length;
+    result.sizeBytes = files.reduce((sum, file) => sum + file.size, 0);
+    for (const file of files) {
+      const lines = readStorageSegmentLines(file.path);
+      for await (const line of lines) {
+        if (!line.includes("thread/tokenUsage/updated")) continue;
+        addTokenUsageLine(result, line);
+      }
+    }
+  } catch (error) {
+    result.error = error.message;
+    storageState.lastError = error.message;
+  }
+
+  for (const entry of storageState.pending) {
+    if (entry.line.includes("thread/tokenUsage/updated")) addTokenUsageLine(result, entry.line);
+  }
+
+  finalizeTokenUsageStats(result);
+  storageState.tokenUsageScanCache = result;
+  return result;
+}
+
+function createTokenUsageAccumulator(scannedAt) {
+  return {
+    enabled: STORAGE_ENABLED,
+    storageDir: STORAGE_DIR,
+    scannedAt,
+    segmentCount: 0,
+    sizeBytes: 0,
+    eventCount: 0,
+    threadCount: 0,
+    turnCount: 0,
+    earliestTs: 0,
+    latestTs: 0,
+    latestTotal: emptyTokenUsageTotals(),
+    latestLast: emptyTokenUsageTotals(),
+    modelContextWindow: 0,
+    topThreads: [],
+    topTurns: [],
+    error: "",
+    _threads: new Map(),
+    _turns: new Map(),
+  };
+}
+
+function emptyTokenUsageTotals() {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+  };
+}
+
+function addTokenUsageLine(result, line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (event.method !== "thread/tokenUsage/updated") return;
+  const params = event.rawJson?.params || {};
+  const usage = params.tokenUsage;
+  if (!usage) return;
+
+  const ts = Number(event.ts_ms) || 0;
+  const threadId = event.threadId || params.threadId || "";
+  const turnId = event.turnId || params.turnId || "";
+  if (!threadId && !turnId) return;
+
+  result.eventCount += 1;
+  if (ts) {
+    result.earliestTs = result.earliestTs ? Math.min(result.earliestTs, ts) : ts;
+    result.latestTs = Math.max(result.latestTs, ts);
+  }
+
+  if (threadId) {
+    const current = result._threads.get(threadId);
+    if (!current || ts >= current.ts) {
+      result._threads.set(threadId, {
+        threadId,
+        ts,
+        total: normalizeTokenUsageTotals(usage.total),
+        last: normalizeTokenUsageTotals(usage.last),
+        modelContextWindow: Number(usage.modelContextWindow) || 0,
+      });
+    }
+  }
+
+  if (turnId) {
+    const current = result._turns.get(turnId) || {
+      turnId,
+      threadId,
+      events: 0,
+      ts: 0,
+      last: emptyTokenUsageTotals(),
+      total: emptyTokenUsageTotals(),
+      modelContextWindow: 0,
+    };
+    current.events += 1;
+    if (ts >= current.ts) {
+      current.threadId = threadId || current.threadId;
+      current.ts = ts;
+      current.last = normalizeTokenUsageTotals(usage.last);
+      current.total = normalizeTokenUsageTotals(usage.total);
+      current.modelContextWindow = Number(usage.modelContextWindow) || 0;
+    }
+    result._turns.set(turnId, current);
+  }
+}
+
+function normalizeTokenUsageTotals(value = {}) {
+  return {
+    totalTokens: Number(value.totalTokens) || 0,
+    inputTokens: Number(value.inputTokens) || 0,
+    cachedInputTokens: Number(value.cachedInputTokens) || 0,
+    outputTokens: Number(value.outputTokens) || 0,
+    reasoningOutputTokens: Number(value.reasoningOutputTokens) || 0,
+  };
+}
+
+function finalizeTokenUsageStats(result) {
+  const threads = [...result._threads.values()];
+  const turns = [...result._turns.values()];
+  result.threadCount = threads.length;
+  result.turnCount = turns.length;
+
+  const latestThread = threads.reduce((best, row) => (!best || row.ts > best.ts ? row : best), null);
+  if (latestThread) {
+    result.latestTotal = latestThread.total;
+    result.latestLast = latestThread.last;
+    result.modelContextWindow = latestThread.modelContextWindow;
+  }
+
+  result.topThreads = threads
+    .sort((a, b) => b.total.totalTokens - a.total.totalTokens)
+    .slice(0, TOKEN_USAGE_TOP_LIMIT)
+    .map(publicTokenThreadRow);
+  result.topTurns = turns
+    .sort((a, b) => b.last.totalTokens - a.last.totalTokens)
+    .slice(0, TOKEN_USAGE_TOP_LIMIT)
+    .map(publicTokenTurnRow);
+
+  delete result._threads;
+  delete result._turns;
+}
+
+function publicTokenThreadRow(row) {
+  return {
+    threadId: row.threadId,
+    ts: row.ts,
+    total: row.total,
+    last: row.last,
+    modelContextWindow: row.modelContextWindow,
+    contextUsageRatio: row.modelContextWindow ? row.last.totalTokens / row.modelContextWindow : 0,
+  };
+}
+
+function publicTokenTurnRow(row) {
+  return {
+    turnId: row.turnId,
+    threadId: row.threadId,
+    ts: row.ts,
+    events: row.events,
+    last: row.last,
+    total: row.total,
+    modelContextWindow: row.modelContextWindow,
+    contextUsageRatio: row.modelContextWindow ? row.last.totalTokens / row.modelContextWindow : 0,
+  };
+}
+
 async function cleanupStorage({ keepDays = null, targetBytes = null, dryRun = false } = {}) {
   if (!STORAGE_ENABLED) return { deletedBytes: 0, deletedSegments: 0, candidates: [] };
   await flushStoragePending();
@@ -1540,6 +1871,7 @@ async function cleanupStorage({ keepDays = null, targetBytes = null, dryRun = fa
   }
   if (!dryRun) {
     storageState.scanCache = null;
+    storageState.tokenUsageScanCache = null;
     broadcast("status", currentStatus());
   }
   return {
@@ -1828,6 +2160,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/api/storage") {
     sendJson(res, await storageStats({ force: url.searchParams.get("force") === "1" }));
+    return;
+  }
+  if (url.pathname === "/api/token-usage") {
+    sendJson(res, await tokenUsageStats({ force: url.searchParams.get("force") === "1" }));
     return;
   }
   if (url.pathname === "/api/storage/cleanup" && req.method === "POST") {

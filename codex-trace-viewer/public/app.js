@@ -12,8 +12,11 @@ const state = {
   status: null,
   storage: null,
   storageRefreshScheduled: false,
+  tokenUsage: null,
+  tokenUsageRefreshScheduled: false,
   conversationModel: null,
   conversationRefreshScheduled: false,
+  conversationViewSignature: "",
   renderScheduled: false,
   turnSortDescending: true,
 };
@@ -22,11 +25,14 @@ const maxDisplayedBlockChars = 16000;
 const maxStoredBlockChars = 32000;
 const maxTimelineSummaryChars = 600;
 const temporarySessionId = "__codex_trace_temporary_sessions__";
+const debugPerf = new URLSearchParams(window.location.search).get("debugPerf") === "1";
+const jumpFlashTimers = new WeakMap();
 const temporarySessionTitle = "临时会话";
 
 const els = {
   statusLine: document.querySelector("#statusLine"),
   conversationTabBtn: document.querySelector("#conversationTabBtn"),
+  tokensTabBtn: document.querySelector("#tokensTabBtn"),
   timelineTabBtn: document.querySelector("#timelineTabBtn"),
   pauseBtn: document.querySelector("#pauseBtn"),
   clearBtn: document.querySelector("#clearBtn"),
@@ -37,6 +43,17 @@ const els = {
   limitInput: document.querySelector("#limitInput"),
   conversationView: document.querySelector("#conversationView"),
   conversationSplitter: document.querySelector("#conversationSplitter"),
+  tokensView: document.querySelector("#tokensView"),
+  tokensMeta: document.querySelector("#tokensMeta"),
+  refreshTokensBtn: document.querySelector("#refreshTokensBtn"),
+  tokenTotalValue: document.querySelector("#tokenTotalValue"),
+  tokenInputValue: document.querySelector("#tokenInputValue"),
+  tokenCachedValue: document.querySelector("#tokenCachedValue"),
+  tokenOutputValue: document.querySelector("#tokenOutputValue"),
+  tokenReasoningValue: document.querySelector("#tokenReasoningValue"),
+  tokenContextValue: document.querySelector("#tokenContextValue"),
+  tokenThreadsTable: document.querySelector("#tokenThreadsTable"),
+  tokenTurnsTable: document.querySelector("#tokenTurnsTable"),
   timelineView: document.querySelector("#timelineView"),
   sessionList: document.querySelector("#sessionList"),
   sessionCountLine: document.querySelector("#sessionCountLine"),
@@ -55,6 +72,7 @@ const els = {
   conversationTitle: document.querySelector("#conversationTitle"),
   conversationMeta: document.querySelector("#conversationMeta"),
   conversationMessages: document.querySelector("#conversationMessages"),
+  segmentRail: document.querySelector("#segmentRail"),
   chatShell: document.querySelector(".chatShell"),
   detailSplitter: document.querySelector("#detailSplitter"),
   segmentDetail: document.querySelector("#segmentDetail"),
@@ -81,6 +99,10 @@ function eventTime(event) {
   if (!event.ts_ms) return "";
   const date = new Date(event.ts_ms);
   return date.toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(date.getMilliseconds()).padStart(3, "0");
+}
+
+function clockTime(ms) {
+  return eventTime({ ts_ms: ms });
 }
 
 function durationLabel(ms) {
@@ -115,6 +137,38 @@ function formatBytes(bytes) {
   return `${scaled >= 10 ? scaled.toFixed(1) : scaled.toFixed(2)} ${units[index]}`;
 }
 
+function formatTokenCount(value) {
+  const number = Number(value || 0);
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 1 : 2)}M`;
+  if (number >= 10_000) return `${(number / 1000).toFixed(1)}K`;
+  return String(Math.round(number));
+}
+
+function formatPercent(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return "0%";
+  return `${(number * 100).toFixed(number >= 0.1 ? 1 : 2)}%`;
+}
+
+function formatTokenLine(label, totals = {}) {
+  return `${label}: total ${formatTokenCount(totals.totalTokens)}, input ${formatTokenCount(totals.inputTokens)}, cached ${formatTokenCount(totals.cachedInputTokens)}, output ${formatTokenCount(totals.outputTokens)}, reasoning ${formatTokenCount(totals.reasoningOutputTokens)}`;
+}
+
+function tokenUsageTitle(turn) {
+  const usage = turn?.tokenUsage;
+  if (!usage) return "";
+  const lines = ["Tokens"];
+  lines.push(formatTokenLine("last call", usage.last));
+  lines.push(formatTokenLine("thread total", usage.total));
+  if (usage.last?.inputTokens) {
+    lines.push(`cache hit: ${formatPercent(usage.last.cachedInputTokens / usage.last.inputTokens)} of last input`);
+  }
+  if (usage.modelContextWindow) {
+    lines.push(`context: ${formatPercent((usage.last?.totalTokens || 0) / usage.modelContextWindow)} of ${formatTokenCount(usage.modelContextWindow)}`);
+  }
+  return lines.join("\n");
+}
+
 function formatDateTime(ms) {
   if (!ms) return "";
   return new Date(ms).toLocaleString("zh-CN", { hour12: false });
@@ -126,13 +180,82 @@ function passesFilters(event) {
   const thread = els.threadFilter.value.trim().toLowerCase();
   const text = els.textFilter.value.trim().toLowerCase();
   if (dir && event.dir !== dir) return false;
-  if (method && !String(event.method || "").toLowerCase().includes(method)) return false;
+  if (method && !eventMethodSearchText(event).includes(method)) return false;
   if (thread && !eventMatchesThreadFilter(event, thread)) return false;
   if (text) {
-    const haystack = `${event.summary || ""}\n${event.raw || ""}\n${event.itemId || ""}\n${event.turnId || ""}`.toLowerCase();
+    const haystack = eventSearchText(event);
     if (!haystack.includes(text)) return false;
   }
   return true;
+}
+
+function eventMethodSearchText(event) {
+  const item = eventItem(event);
+  const itemType = eventItemType(event);
+  const itemId = eventItemId(event);
+  return [
+    event.method,
+    event.rawJson?.method,
+    event.itemType,
+    item?.type,
+    item?.status,
+    `item.type=${itemType}`,
+    `item.type === "${itemType}"`,
+    `item.id=${itemId}`,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function eventSearchText(event) {
+  const item = eventItem(event);
+  const itemType = eventItemType(event);
+  const itemId = eventItemId(event);
+  return [
+    event.summary,
+    event.raw,
+    event.method,
+    event.rawJson?.method,
+    event.sessionId,
+    event.threadId,
+    event.turnId,
+    event.itemId,
+    event.itemType,
+    item?.id,
+    item?.type,
+    item?.status,
+    item?.phase,
+    item?.command,
+    item?.cwd,
+    item?.server,
+    item?.tool,
+    `item.type=${itemType}`,
+    `item.type === "${itemType}"`,
+    `item.id=${itemId}`,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function eventItem(event) {
+  return event.rawJson?.params?.item || null;
+}
+
+function eventItemType(event) {
+  return event.itemType || eventItem(event)?.type || "";
+}
+
+function eventItemId(event) {
+  return event.itemId || eventItem(event)?.id || "";
+}
+
+function eventItemLabel(event) {
+  const type = eventItemType(event);
+  const id = eventItemId(event);
+  if (!type && !id) return "";
+  return [type, shortId(id)].filter(Boolean).join(" / ");
 }
 
 function eventMatchesThreadFilter(event, needle) {
@@ -159,6 +282,7 @@ function render() {
   state.renderScheduled = false;
   renderTabs();
   renderStorage();
+  renderTokens();
   renderSessionsAndConversation();
   renderTimeline();
 }
@@ -171,10 +295,14 @@ function scheduleRender() {
 
 function renderTabs() {
   const conversation = state.activeTab === "conversation";
+  const tokens = state.activeTab === "tokens";
+  const timeline = state.activeTab === "timeline";
   els.conversationView.classList.toggle("hidden", !conversation);
-  els.timelineView.classList.toggle("hidden", conversation);
+  els.tokensView.classList.toggle("hidden", !tokens);
+  els.timelineView.classList.toggle("hidden", !timeline);
   els.conversationTabBtn.classList.toggle("active", conversation);
-  els.timelineTabBtn.classList.toggle("active", !conversation);
+  els.tokensTabBtn.classList.toggle("active", tokens);
+  els.timelineTabBtn.classList.toggle("active", timeline);
   els.liveLine.textContent = state.paused ? "paused" : "live";
 }
 
@@ -194,7 +322,95 @@ function renderStorage() {
   els.storageDetail.textContent = `${pendingEvents} pending (${formatBytes(pendingBytes)})${lastFlush}${storage.lastError ? ` / error: ${storage.lastError}` : ""}`;
 }
 
-function renderSessionsAndConversation() {
+function renderTokens() {
+  const usage = state.tokenUsage;
+  if (!usage) {
+    els.tokensMeta.textContent = "Token usage has not been loaded.";
+    setTokenSummaryValues(null);
+    renderTokenTable(els.tokenThreadsTable, "thread", []);
+    renderTokenTable(els.tokenTurnsTable, "turn", []);
+    return;
+  }
+  if (!usage.enabled) {
+    els.tokensMeta.textContent = "Storage is disabled, so token usage cannot be analyzed.";
+    setTokenSummaryValues(null);
+    renderTokenTable(els.tokenThreadsTable, "thread", []);
+    renderTokenTable(els.tokenTurnsTable, "turn", []);
+    return;
+  }
+
+  const latestTotal = usage.latestTotal || {};
+  const latestLast = usage.latestLast || {};
+  setTokenSummaryValues({ latestTotal, latestLast, modelContextWindow: usage.modelContextWindow });
+  const range = usage.earliestTs && usage.latestTs ? `${formatDateTime(usage.earliestTs)} - ${formatDateTime(usage.latestTs)}` : "no token events";
+  const error = usage.error ? ` / error: ${usage.error}` : "";
+  els.tokensMeta.textContent = `${usage.eventCount || 0} events / ${usage.threadCount || 0} threads / ${usage.turnCount || 0} turns / ${range}${error}`;
+  renderTokenTable(els.tokenThreadsTable, "thread", usage.topThreads || []);
+  renderTokenTable(els.tokenTurnsTable, "turn", usage.topTurns || []);
+}
+
+function setTokenSummaryValues(summary) {
+  if (!summary) {
+    els.tokenTotalValue.textContent = "--";
+    els.tokenInputValue.textContent = "--";
+    els.tokenCachedValue.textContent = "--";
+    els.tokenOutputValue.textContent = "--";
+    els.tokenReasoningValue.textContent = "--";
+    els.tokenContextValue.textContent = "--";
+    return;
+  }
+  const total = summary.latestTotal || {};
+  const last = summary.latestLast || {};
+  const cachedRatio = total.inputTokens ? total.cachedInputTokens / total.inputTokens : 0;
+  const reasoningRatio = total.outputTokens ? total.reasoningOutputTokens / total.outputTokens : 0;
+  const contextRatio = summary.modelContextWindow ? last.totalTokens / summary.modelContextWindow : 0;
+  els.tokenTotalValue.textContent = formatTokenCount(total.totalTokens);
+  els.tokenInputValue.textContent = formatTokenCount(total.inputTokens);
+  els.tokenCachedValue.textContent = `${formatTokenCount(total.cachedInputTokens)} / ${formatPercent(cachedRatio)}`;
+  els.tokenOutputValue.textContent = formatTokenCount(total.outputTokens);
+  els.tokenReasoningValue.textContent = `${formatTokenCount(total.reasoningOutputTokens)} / ${formatPercent(reasoningRatio)}`;
+  els.tokenContextValue.textContent = summary.modelContextWindow ? `${formatPercent(contextRatio)} of ${formatTokenCount(summary.modelContextWindow)}` : "--";
+}
+
+function renderTokenTable(container, type, rows) {
+  const idLabel = type === "thread" ? "Thread" : "Turn";
+  const header = `
+    <div class="tokenTableRow header">
+      <span>${idLabel}</span>
+      <span class="numeric">Total</span>
+      <span class="numeric">Input</span>
+      <span class="numeric">Cached</span>
+      <span class="numeric">Output</span>
+      <span class="numeric">Reasoning</span>
+      <span class="numeric">Context</span>
+    </div>
+  `;
+  if (!rows.length) {
+    container.innerHTML = `${header}<div class="emptyState">No token usage events.</div>`;
+    return;
+  }
+  container.innerHTML = header + rows.map((row) => tokenTableRow(row, type)).join("");
+}
+
+function tokenTableRow(row, type) {
+  const totals = type === "thread" ? row.total || {} : row.last || {};
+  const id = type === "thread" ? row.threadId : row.turnId;
+  const title = type === "thread" ? row.threadId : `${row.turnId} / ${row.threadId || ""}`;
+  return `
+    <button class="tokenTableRow tokenDataRow" type="button" data-thread-id="${escapeHtml(row.threadId || "")}" data-turn-id="${escapeHtml(row.turnId || "")}" title="${escapeHtml(title || "")}">
+      <span class="idCell">${escapeHtml(shortId(id))}</span>
+      <span class="numeric">${escapeHtml(formatTokenCount(totals.totalTokens))}</span>
+      <span class="numeric">${escapeHtml(formatTokenCount(totals.inputTokens))}</span>
+      <span class="numeric">${escapeHtml(formatTokenCount(totals.cachedInputTokens))}</span>
+      <span class="numeric">${escapeHtml(formatTokenCount(totals.outputTokens))}</span>
+      <span class="numeric">${escapeHtml(formatTokenCount(totals.reasoningOutputTokens))}</span>
+      <span class="numeric">${escapeHtml(formatPercent(row.contextUsageRatio))}</span>
+    </button>
+  `;
+}
+
+function renderSessionsAndConversation(options = {}) {
+  const preserveConversation = Boolean(options.preserveConversation);
   const model = filteredConversationModel() || buildConversationModel(state.events.filter(passesFilters), state.events);
   if (!state.selectedSessionId || !model.sessions.some((session) => session.id === state.selectedSessionId)) {
     state.selectedSessionId = model.sessions[0]?.id || "";
@@ -202,6 +418,7 @@ function renderSessionsAndConversation() {
     state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
+    state.conversationViewSignature = "";
   }
   if (state.expandedSessionId && !model.sessions.some((session) => session.id === state.expandedSessionId)) {
     state.expandedSessionId = "";
@@ -211,7 +428,47 @@ function renderSessionsAndConversation() {
   const expanded = model.sessions.find((session) => session.id === state.expandedSessionId);
   if (selected) ensureSelectedThread(selected);
   renderTurnOverlay(expanded);
+  const nextSignature = conversationViewSignature(selected);
+  if (preserveConversation && nextSignature && nextSignature === state.conversationViewSignature) {
+    renderSegmentsActiveState();
+    renderSegmentDetail(findSelectedSegment(selected));
+    if (debugPerf) console.debug("[trace-viewer] preserve conversation render", { sessionId: selected?.id || "", signatureLength: nextSignature.length });
+    return;
+  }
+  state.conversationViewSignature = nextSignature;
   renderConversation(selected);
+}
+
+function conversationViewSignature(session) {
+  if (!session) return "";
+  const thread = state.selectedThreadId ? sessionThreads(session).find((candidate) => candidate.id === state.selectedThreadId) : ensureSelectedThread(session);
+  if (!thread) return `session:${session.id}:none`;
+  const parts = [
+    session.id,
+    thread.id,
+    state.turnSortDescending ? "desc" : "asc",
+    String((thread.turns || []).length),
+  ];
+  for (const turn of thread.turns || []) {
+    parts.push("turn", turn.id, String((turn.blocks || []).length), turn.status || "", String(turn.durationMs ?? ""));
+    for (const block of turn.blocks || []) {
+      parts.push(
+        block.key || "",
+        block.kind || "",
+        block.role || "",
+        block.label || "",
+        block.meta || "",
+        block.status || "",
+        String(block.events?.length || block.eventCount || 0),
+        String(block.firstSeq ?? ""),
+        String(block.lastSeq ?? ""),
+        String(block.firstTs || 0),
+        String(block.lastTs || 0),
+        truncateInline(block.preview || "", 160)
+      );
+    }
+  }
+  return parts.join("|");
 }
 
 function filteredConversationModel() {
@@ -279,7 +536,7 @@ function blockMatchesFilters(block, session, threadModel, turn) {
   const text = els.textFilter.value.trim().toLowerCase();
   if (dir && !(block.events || []).some((event) => event.dir === dir)) return false;
   if (method) {
-    const methods = `${block.meta || ""}\n${(block.events || []).map((event) => event.method || "").join("\n")}`.toLowerCase();
+    const methods = blockMethodSearchText(block);
     if (!methods.includes(method)) return false;
   }
   if (thread) {
@@ -287,10 +544,52 @@ function blockMatchesFilters(block, session, threadModel, turn) {
     if (!threadHaystack.includes(thread)) return false;
   }
   if (text) {
-    const haystack = `${block.preview || ""}\n${blockText(block)}\n${block.itemId || ""}\n${turn.id || ""}\n${threadModel.id || ""}\n${session.id || ""}`.toLowerCase();
+    const haystack = blockSearchText(block, session, threadModel, turn);
     if (!haystack.includes(text)) return false;
   }
   return true;
+}
+
+function blockMethodSearchText(block) {
+  const itemType = block.itemType || "";
+  return [
+    block.meta,
+    block.kind,
+    block.role,
+    block.label,
+    itemType,
+    `item.type=${itemType}`,
+    `item.type === "${itemType}"`,
+    ...(block.events || []).flatMap((event) => [event.method, event.itemType]),
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function blockSearchText(block, session, threadModel, turn) {
+  const itemType = block.itemType || "";
+  return [
+    block.preview,
+    blockText(block),
+    block.meta,
+    block.kind,
+    block.role,
+    block.label,
+    block.itemId,
+    block.itemType,
+    turn.id,
+    threadModel.id,
+    threadModel.threadId,
+    session.id,
+    session.sessionId,
+    `item.type=${itemType}`,
+    `item.type === "${itemType}"`,
+    `item.id=${block.itemId || ""}`,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
 }
 
 function renderSessionList(sessions) {
@@ -321,6 +620,7 @@ function renderSessionList(sessions) {
         state.selectedThreadId = "";
         state.selectedTurnId = "";
         state.selectedSegmentKey = "";
+        state.conversationViewSignature = "";
       }
       render();
     });
@@ -374,7 +674,10 @@ function renderTurnOverlay(session) {
       button.type = "button";
       button.className = "sessionTurnRow";
       if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) button.classList.add("active");
-      button.title = `${shortId(threadModel.id)} / Turn ${number} / ${shortId(turn.id)} / ${turn.blocks.length} segments`;
+      button.title = [
+        `${shortId(threadModel.id)} / Turn ${number} / ${shortId(turn.id)} / ${turn.blocks.length} segments`,
+        tokenUsageTitle(turn),
+      ].filter(Boolean).join("\n");
       button.dataset.threadId = threadModel.id;
       button.dataset.turnId = turn.id;
       button.innerHTML = `
@@ -398,10 +701,13 @@ function closeTurnOverlay() {
 }
 
 function renderConversation(session) {
+  const renderStart = debugPerf ? performance.now() : 0;
+  let renderedBlocks = 0;
   if (!session) {
     els.conversationTitle.textContent = "No session selected";
     els.conversationMeta.textContent = "Select a session to inspect turns.";
     els.conversationMessages.innerHTML = `<div class="emptyState">No conversation events in the current filters.</div>`;
+    renderSegmentRail(null, null);
     renderSegmentDetail(null);
     return;
   }
@@ -432,12 +738,26 @@ function renderConversation(session) {
   els.conversationMessages.innerHTML = "";
   const fragment = document.createDocumentFragment();
   const visibleThreads = activeThread ? [activeThread] : [];
+  let defaultRailTurn = null;
   for (const threadModel of visibleThreads) {
     fragment.appendChild(threadDivider(threadModel));
     for (const { turn, number } of numberedTurnsForDisplay(threadModel)) {
-      fragment.appendChild(turnDivider(threadModel, turn, number));
-      for (const block of blocksForDisplay(turn)) {
-        fragment.appendChild(segmentCard(block, threadModel, turn));
+      if (!defaultRailTurn) defaultRailTurn = { thread: threadModel, turn };
+      const blocks = blocksWithDisplayNumbers(turn);
+      if (state.turnSortDescending) {
+        fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "end"));
+        for (const { block, number } of blocks) {
+          fragment.appendChild(segmentCard(block, threadModel, turn, number));
+          renderedBlocks += 1;
+        }
+        fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
+      } else {
+        fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
+        for (const { block, number } of blocks) {
+          fragment.appendChild(segmentCard(block, threadModel, turn, number));
+          renderedBlocks += 1;
+        }
+        fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "end"));
       }
     }
   }
@@ -446,7 +766,15 @@ function renderConversation(session) {
   } else {
     els.conversationMessages.appendChild(fragment);
   }
+  renderSegmentRail(activeThread, currentRailTurn(activeThread, defaultRailTurn));
   renderSegmentDetail(findSelectedSegment(session));
+  if (debugPerf) {
+    console.debug("[trace-viewer] renderConversation", {
+      ms: Math.round((performance.now() - renderStart) * 10) / 10,
+      blocks: renderedBlocks,
+      threadId: activeThread?.id || "",
+    });
+  }
 }
 
 function threadDivider(threadModel) {
@@ -464,19 +792,122 @@ function threadDivider(threadModel) {
   return el;
 }
 
-function turnDivider(threadModel, turn, number) {
+function turnLifecycleDivider(threadModel, turn, number, phase) {
   const el = document.createElement("div");
-  el.className = "turnDivider";
+  el.className = `turnDivider turnLifecycleDivider turn${phase === "start" ? "Start" : "End"}`;
   if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) el.classList.add("active");
-  el.id = `turn-${cssSafeId(threadModel.id)}-${cssSafeId(turn.id)}`;
+  el.id = turnLifecycleId(threadModel.id, turn.id, phase);
   el.dataset.threadId = threadModel.id;
   el.dataset.turnId = turn.id;
-  const status = turn.status ? ` / ${turn.status}` : "";
-  const duration = turn.durationMs != null ? ` / ${durationLabel(turn.durationMs)}` : "";
+  el.dataset.phase = phase;
+  el.tabIndex = 0;
+  el.title = [phase === "start" ? "Click to jump to turn end" : "Click to jump to turn start", tokenUsageTitle(turn)].filter(Boolean).join("\n\n");
+  const phaseLabel = phase === "start" ? "start" : "end";
+  const time = turnLifecycleTimeLabel(turn, phase);
+  const status = phase === "end" && turn.status ? ` / ${turn.status}` : "";
+  const duration = phase === "end" && turn.durationMs != null ? ` / ${durationLabel(turn.durationMs)}` : "";
   el.innerHTML = `
-    <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(shortId(turn.id))}${status}${duration}</span>
+    <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(phaseLabel)} ${escapeHtml(shortId(turn.id))} / ${escapeHtml(time)}${status}${duration}</span>
   `;
+  const jump = () => {
+    state.selectedThreadId = threadModel.id;
+    state.selectedTurnId = turn.id;
+    state.selectedSegmentKey = "";
+    renderSegmentRail(threadModel, { thread: threadModel, turn });
+    renderSegmentsActiveState();
+    renderSegmentDetail(null);
+    scrollToTurnLifecycle(threadModel.id, turn.id, phase === "start" ? "end" : "start", "center");
+  };
+  el.addEventListener("click", jump);
+  el.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    jump();
+  });
   return el;
+}
+
+function turnLifecycleTimeLabel(turn, phase) {
+  const ms = turnLifecycleTimeMs(turn, phase);
+  return ms ? clockTime(ms) : "not recorded";
+}
+
+function turnLifecycleTimeMs(turn, phase) {
+  if (phase === "start") {
+    return Number(turn.startedTs) || epochLikeToMs(turn.startedAt) || Number(turn.firstTs) || 0;
+  }
+  return Number(turn.completedTs) || epochLikeToMs(turn.completedAt) || 0;
+}
+
+function epochLikeToMs(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number < 1_000_000_000_000 ? number * 1000 : number;
+}
+
+function turnLifecycleId(threadId, turnId, phase) {
+  return `turn-${cssSafeId(threadId)}-${cssSafeId(turnId)}-${phase}`;
+}
+
+function conversationScrollDelta(container, target, block = "start") {
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const padding = 16;
+  if (block === "center") {
+    return targetRect.top + targetRect.height / 2 - (containerRect.top + containerRect.height / 2);
+  }
+  if (block === "end") {
+    return targetRect.bottom - containerRect.bottom + padding;
+  }
+  if (block === "nearest") {
+    if (targetRect.top >= containerRect.top + padding && targetRect.bottom <= containerRect.bottom - padding) return 0;
+    if (targetRect.top < containerRect.top + padding) return targetRect.top - containerRect.top - padding;
+    return targetRect.bottom - containerRect.bottom + padding;
+  }
+  return targetRect.top - containerRect.top - padding;
+}
+
+function setConversationScrollTop(container, value) {
+  const max = Math.max(0, container.scrollHeight - container.clientHeight);
+  container.scrollTop = Math.max(0, Math.min(max, value));
+}
+
+function flashJumpTarget(target) {
+  if (!(target instanceof HTMLElement)) return;
+  const previous = jumpFlashTimers.get(target);
+  if (previous) window.clearTimeout(previous);
+  target.classList.remove("jumpFlash");
+  void target.offsetWidth;
+  target.classList.add("jumpFlash");
+  jumpFlashTimers.set(
+    target,
+    window.setTimeout(() => {
+      target.classList.remove("jumpFlash");
+      jumpFlashTimers.delete(target);
+    }, 720),
+  );
+}
+
+function jumpToConversationElement(target, block = "start", options = {}) {
+  const container = els.conversationMessages;
+  if (!(container instanceof HTMLElement) || !(target instanceof HTMLElement) || !container.contains(target)) return false;
+  const apply = () => {
+    const delta = conversationScrollDelta(container, target, block);
+    if (Math.abs(delta) > 1) setConversationScrollTop(container, container.scrollTop + delta);
+  };
+  apply();
+  if (options.settle !== false) window.requestAnimationFrame(apply);
+  if (options.flash !== false) flashJumpTarget(target);
+  return true;
+}
+
+function turnLifecycleElement(threadId, turnId, phase = null) {
+  const targetPhase = phase || (state.turnSortDescending ? "end" : "start");
+  return document.querySelector(`#${turnLifecycleId(threadId, turnId, targetPhase)}`);
+}
+
+function scrollToTurnLifecycle(threadId, turnId, phase = null, block = "start") {
+  return jumpToConversationElement(turnLifecycleElement(threadId, turnId, phase), block);
 }
 
 function turnLabel(turn, number) {
@@ -496,8 +927,66 @@ function numberedTurnsForDisplay(threadModel) {
 }
 
 function blocksForDisplay(turn) {
-  const blocks = turn.blocks || [];
-  return state.turnSortDescending ? [...blocks].reverse() : blocks;
+  return blocksWithDisplayNumbers(turn).map((item) => item.block);
+}
+
+function blocksWithDisplayNumbers(turn) {
+  const blocks = (turn.blocks || []).map((block, index) => ({ block, number: index + 1 }));
+  return state.turnSortDescending ? blocks.reverse() : blocks;
+}
+
+function currentRailTurn(activeThread, fallback) {
+  if (!activeThread) return null;
+  if (state.selectedThreadId === activeThread.id && state.selectedTurnId) {
+    const selectedTurn = (activeThread.turns || []).find((turn) => turn.id === state.selectedTurnId);
+    if (selectedTurn) return { thread: activeThread, turn: selectedTurn };
+  }
+  return fallback || null;
+}
+
+function renderSegmentRail(activeThread, railTurn) {
+  els.segmentRail.innerHTML = "";
+  if (!activeThread || !railTurn?.turn) {
+    els.segmentRail.classList.remove("open");
+    return;
+  }
+  const blocks = blocksWithDisplayNumbers(railTurn.turn);
+  if (!blocks.length) {
+    els.segmentRail.classList.remove("open");
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  blocks.forEach(({ block, number }) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "segmentRailItem";
+    if (block.key === state.selectedSegmentKey) button.classList.add("active");
+    button.dataset.threadId = railTurn.thread.id;
+    button.dataset.turnId = railTurn.turn.id;
+    button.dataset.segmentKey = block.key;
+    button.title = `${number}. ${block.label || block.kind || "segment"} / ${block.meta || ""}`;
+    button.innerHTML = `
+      <span class="segmentRailNumber">${number}</span>
+      <span class="segmentRailKind">${escapeHtml(segmentRailLabel(block))}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.selectedThreadId = railTurn.thread.id;
+      state.selectedTurnId = railTurn.turn.id;
+      state.selectedSegmentKey = block.key;
+      renderSegmentsActiveState();
+      renderSegmentDetail({ block, thread: railTurn.thread, turn: railTurn.turn });
+      jumpToConversationElement(document.querySelector(segmentDomSelector(railTurn.thread.id, railTurn.turn.id, block.key)), "center");
+    });
+    fragment.appendChild(button);
+  });
+  els.segmentRail.appendChild(fragment);
+  els.segmentRail.classList.add("open");
+}
+
+function segmentRailLabel(block) {
+  if (isContextCompactionBlock(block)) return "compact";
+  return block.label || block.kind || block.role || "segment";
 }
 
 function turnNumber(threadModel, turn) {
@@ -509,17 +998,36 @@ function selectThread(threadId) {
   state.selectedThreadId = threadId;
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
+  state.conversationViewSignature = "";
   render();
+}
+
+function findThreadTurnInSession(session, threadId, turnId) {
+  if (!session) return null;
+  for (const thread of sessionThreads(session)) {
+    if (threadId && thread.id !== threadId) continue;
+    const turn = (thread.turns || []).find((candidate) => candidate.id === turnId);
+    if (turn) return { thread, turn };
+  }
+  return null;
 }
 
 function selectTurn(threadId, turnId) {
   state.selectedThreadId = threadId;
   state.selectedTurnId = turnId;
   state.selectedSegmentKey = "";
+  const session = state.conversationModel?.sessions?.find((candidate) => candidate.id === state.selectedSessionId);
+  const match = findThreadTurnInSession(session, threadId, turnId);
+  if (match && turnLifecycleElement(threadId, turnId)) {
+    renderSegmentRail(match.thread, { thread: match.thread, turn: match.turn });
+    renderSegmentsActiveState();
+    renderSegmentDetail(null);
+    scrollToTurnLifecycle(threadId, turnId);
+    return;
+  }
+  state.conversationViewSignature = "";
   render();
-  requestAnimationFrame(() => {
-    document.querySelector(`#turn-${cssSafeId(threadId)}-${cssSafeId(turnId)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
+  requestAnimationFrame(() => scrollToTurnLifecycle(threadId, turnId));
 }
 
 function cssSafeId(value) {
@@ -531,17 +1039,40 @@ function cssEscape(value) {
   return String(value || "").replace(/["\\]/g, "\\$&");
 }
 
-function segmentCard(block, threadModel, turn) {
+function segmentDomId(threadId, turnId, segmentKey) {
+  return `segment-${cssSafeId(threadId)}-${cssSafeId(turnId)}-${cssSafeId(segmentKey)}`;
+}
+
+function segmentDomSelector(threadId, turnId, segmentKey) {
+  return `#${segmentDomId(threadId, turnId, segmentKey)}`;
+}
+
+function segmentCard(block, threadModel, turn, number = "") {
   const article = document.createElement("article");
   article.className = `messageBlock segmentCard role-${block.role}`;
+  if (isContextCompactionBlock(block)) article.classList.add("contextCompactionMarker");
   if (block.key === state.selectedSegmentKey) article.classList.add("selected");
-  article.id = `segment-${cssSafeId(block.key)}`;
+  article.id = segmentDomId(threadModel.id, turn.id, block.key);
   article.tabIndex = 0;
+  article.dataset.threadId = threadModel.id;
+  article.dataset.turnId = turn.id;
   article.dataset.segmentKey = block.key;
-  const body = blockText(block);
-  const preview = segmentPreview(block, body);
+  article.dataset.segmentNumber = number;
+  if (isContextCompactionBlock(block)) {
+    article.innerHTML = contextCompactionMarkup(block, number);
+    article.addEventListener("click", () => selectSegment(block, threadModel, turn));
+    article.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectSegment(block, threadModel, turn);
+      }
+    });
+    return article;
+  }
+  const preview = segmentPreview(block);
   article.innerHTML = `
     <div class="messageMeta">
+      <span class="segmentNumberBadge">${escapeHtml(String(number))}</span>
       <span class="roleBadge">${escapeHtml(block.label)}</span>
       <span>${escapeHtml(block.meta)}</span>
       <span>${escapeHtml(eventTime(block.events[0] || {}))}</span>
@@ -559,9 +1090,84 @@ function segmentCard(block, threadModel, turn) {
   return article;
 }
 
-function segmentPreview(block, body) {
-  const text = String(body || block.preview || block.label || "(empty)").replace(/\s+/g, " ").trim();
+function isContextCompactionBlock(block) {
+  return block?.meta === "contextCompaction" || block?.itemType === "contextCompaction";
+}
+
+function contextCompactionMarkup(block, number = "") {
+  const started = eventTime(block.events?.[0] || {});
+  const completed = eventTime(block.events?.at?.(-1) || block.events?.[block.events.length - 1] || {});
+  const duration = blockDurationLabel(block);
+  const itemId = block.itemId ? `item ${shortId(block.itemId)}` : "";
+  const seqRange = block.firstSeq != null && block.lastSeq != null ? `seq ${block.firstSeq}-${block.lastSeq}` : "";
+  return `
+    <div class="contextCompactionLine" aria-label="Context compacted">
+      <span class="contextCompactionRule"></span>
+      <span class="segmentNumberBadge contextCompactionNumber">${escapeHtml(String(number))}</span>
+      <span class="contextCompactionBadge">Context compacted</span>
+      <span class="contextCompactionMeta">${escapeHtml([itemId, started, completed && completed !== started ? `done ${completed}` : "", duration, seqRange, `${block.events?.length || 0} events`].filter(Boolean).join(" / "))}</span>
+      <span class="contextCompactionRule"></span>
+    </div>
+  `;
+}
+
+function blockDurationLabel(block) {
+  if (block.durationMs != null) return durationLabel(block.durationMs);
+  const start = Number(block.firstTs || block.events?.[0]?.ts_ms || 0);
+  const end = Number(block.lastTs || block.events?.[block.events.length - 1]?.ts_ms || 0);
+  if (!start || !end || end <= start) return "";
+  return durationLabel(end - start);
+}
+
+function segmentPreview(block) {
+  if (isContextCompactionBlock(block)) return contextCompactionDetailText(block);
+  const text = compactBlockPreviewSource(block).replace(/\s+/g, " ").trim();
   return truncateInline(text || "(empty)", 360);
+}
+
+function compactBlockPreviewSource(block) {
+  if (!block) return "";
+  if (block.preview && block.preview !== block.kind && block.preview !== block.role) return String(block.preview);
+  if (block.kind === "command") {
+    return [block.command, block.status ? `status: ${block.status}` : "", block.exitCode != null ? `exit=${block.exitCode}` : "", previewSnippet(block.output)].filter(Boolean).join(" / ");
+  }
+  if (block.kind === "tool") {
+    return [`${block.server || "mcp"}.${block.tool || "tool"}`, previewSnippet(block.error || block.resultText || block.argumentsText)].filter(Boolean).join(" / ");
+  }
+  if (block.kind === "webSearch") {
+    return previewSnippet(block.preview || block.text || webSearchBlockDetail(block));
+  }
+  if (block.kind === "file") {
+    const changes = block.changes || [];
+    const paths = changes.map((change) => change.path).filter(Boolean).slice(0, 3).join(", ");
+    return `${changes.length} file changes${paths ? ` / ${paths}` : ""}`;
+  }
+  if (block.kind === "plan") {
+    return (block.plan || []).slice(0, 4).map((item) => `[${item.status}] ${item.step}`).join(" / ");
+  }
+  if (block.kind === "diff") return previewSnippet(block.diff);
+  if (block.kind === "image") return [block.revisedPrompt, block.savedPath].filter(Boolean).join(" / ");
+  return previewSnippet(block.text || block.summary || block.preview || block.label || "");
+}
+
+function previewSnippet(value, max = 520) {
+  const text = String(value || "");
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)} ...`;
+}
+
+function contextCompactionDetailText(block) {
+  const started = eventTime(block.events?.[0] || {});
+  const completed = eventTime(block.events?.at?.(-1) || block.events?.[block.events.length - 1] || {});
+  const lines = ["Conversation context was compacted."];
+  if (block.itemId) lines.push(`itemId: ${block.itemId}`);
+  if (started) lines.push(`started: ${started}`);
+  if (completed && completed !== started) lines.push(`completed: ${completed}`);
+  const duration = blockDurationLabel(block);
+  if (duration) lines.push(`duration: ${duration}`);
+  if (block.firstSeq != null || block.lastSeq != null) lines.push(`seq: ${[block.firstSeq, block.lastSeq].filter((value) => value != null).join(" - ")}`);
+  lines.push(`events: ${block.events?.length || 0}`);
+  return lines.join("\n");
 }
 
 function displayPreview(block, body = null) {
@@ -615,8 +1221,16 @@ function renderSegmentsActiveState() {
   for (const card of document.querySelectorAll(".segmentCard.selected")) {
     card.classList.remove("selected");
   }
-  if (state.selectedSegmentKey) {
-    document.querySelector(`#segment-${cssSafeId(state.selectedSegmentKey)}`)?.classList.add("selected");
+  if (state.selectedThreadId && state.selectedTurnId && state.selectedSegmentKey) {
+    document.querySelector(segmentDomSelector(state.selectedThreadId, state.selectedTurnId, state.selectedSegmentKey))?.classList.add("selected");
+  }
+  for (const item of document.querySelectorAll(".segmentRailItem.active")) {
+    item.classList.remove("active");
+  }
+  if (state.selectedThreadId && state.selectedTurnId && state.selectedSegmentKey) {
+    document
+      .querySelector(`.segmentRailItem[data-thread-id="${cssEscape(state.selectedThreadId)}"][data-turn-id="${cssEscape(state.selectedTurnId)}"][data-segment-key="${cssEscape(state.selectedSegmentKey)}"]`)
+      ?.classList.add("active");
   }
   for (const divider of document.querySelectorAll(".turnDivider.active")) {
     divider.classList.remove("active");
@@ -628,7 +1242,9 @@ function renderSegmentsActiveState() {
     document.querySelector(`#thread-${cssSafeId(state.selectedThreadId)}`)?.classList.add("active");
   }
   if (state.selectedThreadId && state.selectedTurnId) {
-    document.querySelector(`#turn-${cssSafeId(state.selectedThreadId)}-${cssSafeId(state.selectedTurnId)}`)?.classList.add("active");
+    document
+      .querySelectorAll(`.turnDivider[data-thread-id="${cssEscape(state.selectedThreadId)}"][data-turn-id="${cssEscape(state.selectedTurnId)}"]`)
+      .forEach((divider) => divider.classList.add("active"));
   }
   for (const row of document.querySelectorAll(".sessionTurnRow.active")) {
     row.classList.remove("active");
@@ -663,7 +1279,7 @@ function renderSegmentDetail(selection) {
     return;
   }
   const { block, thread, turn } = selection;
-  const body = blockText(block) || "(empty)";
+  const body = isContextCompactionBlock(block) ? contextCompactionDetailText(block) : blockText(block) || "(empty)";
   const displayedBody = truncateForDisplay(body);
   const truncated = displayedBody.length !== body.length;
   const raw = block.events.map((event) => {
@@ -672,7 +1288,7 @@ function renderSegmentDetail(selection) {
   });
   els.segmentDetail.classList.add("open");
   syncSegmentDetailOpen();
-  els.segmentDetailTitle.textContent = `${block.label} / ${block.meta || block.kind}`;
+  els.segmentDetailTitle.textContent = isContextCompactionBlock(block) ? "Context compacted" : `${block.label} / ${block.meta || block.kind}`;
   els.segmentDetailMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
   els.segmentRawMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
   els.segmentContentPre.textContent = `${displayedBody}${truncated ? "\n\n[display truncated]" : ""}`;
@@ -889,6 +1505,18 @@ function findTurnInSession(session, threadId, turnId) {
   });
 }
 
+function findSessionForThreadTurn(threadId, turnId = "") {
+  const sessions = state.conversationModel?.sessions || [];
+  for (const session of sessions) {
+    for (const thread of sessionThreads(session)) {
+      if (threadId && thread.id !== threadId) continue;
+      if (turnId && !(thread.turns || []).some((turn) => turn.id === turnId)) continue;
+      return { session, thread };
+    }
+  }
+  return null;
+}
+
 function sessionTitle(session) {
   if (session?.kind === "temporary" || session?.id === temporarySessionId) return temporarySessionTitle;
   return session.title || session.preview || `Session ${shortId(session.id)}`;
@@ -950,6 +1578,7 @@ function blockText(block) {
     if (block.error) parts.push(`error: ${block.error}`);
     return parts.join("\n\n");
   }
+  if (block.kind === "webSearch") return block.text || webSearchBlockDetail(block);
   if (block.kind === "file") {
     return (block.changes || []).map((change) => `${change.kind?.type || "change"} ${change.path || ""}\n${change.diff || ""}`).join("\n\n");
   }
@@ -992,6 +1621,12 @@ function buildConversationModel(events, allEvents = events) {
     session.source = mergeSourceLabel(session.source, event.source);
     thread.source = mergeSourceLabel(thread.source, event.source);
     const extracted = extractConversationEvent(event);
+    if (!extracted && isTokenUsageEvent(event)) {
+      applyTokenUsageToTurn(thread, event);
+    }
+    if (!extracted && isTurnLifecycleEvent(event)) {
+      applyTurnLifecycle(thread, event);
+    }
     if (!extracted) continue;
     const turnId = extracted.turnId || event.turnId || "unknown-turn";
     const turn = getTurn(thread, turnId);
@@ -1042,6 +1677,7 @@ function getThread(session, id) {
       threadPreview: "",
       turnsById: new Map(),
       turns: [],
+      pendingTokenUsageByTurnId: new Map(),
       events: 0,
       blocks: 0,
       preview: "",
@@ -1303,11 +1939,42 @@ function numericTimestamp(value) {
 
 function getTurn(session, id) {
   if (!session.turnsById.has(id)) {
-    const turn = { id, blocksByKey: new Map(), blocks: [], firstTs: 0, status: "", durationMs: null };
+    const turn = {
+      id,
+      blocksByKey: new Map(),
+      blocks: [],
+      firstTs: 0,
+      status: "",
+      durationMs: null,
+      startedAt: null,
+      completedAt: null,
+      startedTs: 0,
+      completedTs: 0,
+      startedSeq: null,
+      completedSeq: null,
+      error: null,
+    };
     session.turnsById.set(id, turn);
     session.turns.push(turn);
+    const pendingTokenUsage = session.pendingTokenUsageByTurnId?.get(id);
+    if (pendingTokenUsage) {
+      turn.tokenUsage = pendingTokenUsage;
+      session.pendingTokenUsageByTurnId.delete(id);
+    }
   }
   return session.turnsById.get(id);
+}
+
+function isTurnLifecycleEvent(event) {
+  const method = event.method || event.rawJson?.method;
+  return (method === "turn/started" || method === "turn/completed") && Boolean(event.rawJson?.params?.turn?.id);
+}
+
+function applyTurnLifecycle(thread, event) {
+  const turnId = event.rawJson?.params?.turn?.id;
+  if (!turnId) return;
+  const turn = getTurn(thread, turnId);
+  applyTurnMeta(turn, event);
 }
 
 function applyTurnMeta(turn, event) {
@@ -1316,10 +1983,67 @@ function applyTurnMeta(turn, event) {
   const method = raw?.method;
   const ts = event.ts_ms || 0;
   turn.firstTs = turn.firstTs ? Math.min(turn.firstTs, ts) : ts;
-  if ((method === "turn/started" || method === "turn/completed") && params?.turn) {
-    turn.status = params.turn.status || turn.status;
-    turn.durationMs = params.turn.durationMs ?? turn.durationMs;
+  const lifecycle = params?.turn;
+  if (method === "turn/started" && lifecycle) {
+    turn.status = lifecycle.status || turn.status;
+    turn.startedAt = lifecycle.startedAt ?? turn.startedAt;
+    turn.completedAt = lifecycle.completedAt ?? turn.completedAt;
+    turn.startedTs = ts || turn.startedTs;
+    turn.startedSeq = event.seq ?? turn.startedSeq;
+    turn.durationMs = lifecycle.durationMs ?? turn.durationMs;
+    turn.error = lifecycle.error ?? turn.error;
   }
+  if (method === "turn/completed" && lifecycle) {
+    turn.status = lifecycle.status || turn.status;
+    turn.startedAt = lifecycle.startedAt ?? turn.startedAt;
+    turn.completedAt = lifecycle.completedAt ?? turn.completedAt;
+    turn.completedTs = ts || turn.completedTs;
+    turn.completedSeq = event.seq ?? turn.completedSeq;
+    turn.durationMs = lifecycle.durationMs ?? turn.durationMs;
+    turn.error = lifecycle.error ?? turn.error;
+  }
+}
+
+function applyTokenUsageToTurn(thread, event) {
+  const params = event.rawJson?.params || {};
+  const usage = params.tokenUsage;
+  const turnId = event.turnId || params.turnId;
+  if (!usage || !turnId) return;
+  const ts = Number(event.ts_ms) || 0;
+  const nextTokenUsage = normalizeConversationTokenUsage(usage, ts);
+  if (!thread.turnsById.has(turnId)) {
+    const pending = thread.pendingTokenUsageByTurnId?.get(turnId);
+    if (!pending || !ts || pending.ts <= ts) {
+      thread.pendingTokenUsageByTurnId?.set(turnId, nextTokenUsage);
+    }
+    return;
+  }
+  const turn = thread.turnsById.get(turnId);
+  if (turn.tokenUsage && ts && turn.tokenUsage.ts > ts) return;
+  turn.tokenUsage = nextTokenUsage;
+}
+
+function isTokenUsageEvent(event) {
+  return event.method === "thread/tokenUsage/updated" || event.rawJson?.method === "thread/tokenUsage/updated";
+}
+
+function normalizeConversationTokenUsage(usage, ts = 0) {
+  return {
+    ts,
+    total: normalizeTokenUsageTotals(usage?.total),
+    last: normalizeTokenUsageTotals(usage?.last),
+    modelContextWindow: Number(usage?.modelContextWindow) || 0,
+  };
+}
+
+function normalizeTokenUsageTotals(value = {}) {
+  return {
+    totalTokens: Number(value.totalTokens) || 0,
+    inputTokens: Number(value.inputTokens) || 0,
+    cachedInputTokens: Number(value.cachedInputTokens) || 0,
+    outputTokens: Number(value.outputTokens) || 0,
+    reasoningOutputTokens: Number(value.reasoningOutputTokens) || 0,
+  };
 }
 
 function extractConversationEvent(event) {
@@ -1525,6 +2249,23 @@ function extractConversationEvent(event) {
       },
     };
   }
+  if (item.type === "webSearch") {
+    const detail = webSearchDetail(item);
+    return {
+      turnId,
+      block: {
+        ...base,
+        kind: "webSearch",
+        role: "tool",
+        label: "webSearch",
+        meta: webSearchActionType(item.action) || item.status || "webSearch",
+        query: item.query,
+        action: item.action,
+        text: detail,
+        preview: webSearchPreview(item, detail),
+      },
+    };
+  }
   if (item.type === "fileChange") {
     return {
       turnId,
@@ -1561,10 +2302,10 @@ function extractConversationEvent(event) {
         ...base,
         kind: "system",
         role: "system",
-        label: "compaction",
+        label: "context compact",
         meta: "contextCompaction",
-        text: item.id || "context compaction",
-        preview: "context compaction",
+        text: "Conversation context was compacted.",
+        preview: "Context compacted",
       },
     };
   }
@@ -1603,7 +2344,7 @@ function applyBlock(turn, update, event) {
   block.status = update.status ?? block.status;
   block.exitCode = update.exitCode ?? block.exitCode;
   block.durationMs = update.durationMs ?? block.durationMs;
-  for (const field of ["label", "role", "kind", "command", "cwd", "server", "tool", "argumentsText", "resultText", "error", "changes", "plan", "diff", "revisedPrompt", "savedPath"]) {
+  for (const field of ["label", "role", "kind", "command", "cwd", "server", "tool", "argumentsText", "resultText", "error", "changes", "plan", "diff", "revisedPrompt", "savedPath", "itemType", "query", "action"]) {
     if (update[field] != null && update[field] !== "") block[field] = update[field];
   }
   if (update.appendText) {
@@ -1637,6 +2378,34 @@ function reasoningText(item) {
   return [summary, content].filter(Boolean).join("\n\n");
 }
 
+function webSearchActionType(action) {
+  return typeof action?.type === "string" ? action.type : "";
+}
+
+function webSearchDetail(item) {
+  const action = item?.action || {};
+  const actionType = webSearchActionType(action) || "webSearch";
+  const lines = [actionType];
+  if (item?.query) lines.push(`query: ${item.query}`);
+  if (action.query && action.query !== item?.query) lines.push(`action query: ${action.query}`);
+  if (Array.isArray(action.queries) && action.queries.length) {
+    lines.push("queries:");
+    for (const query of action.queries) lines.push(`- ${query}`);
+  }
+  if (action.url) lines.push(`url: ${action.url}`);
+  if (action.pattern) lines.push(`pattern: ${action.pattern}`);
+  return lines.join("\n");
+}
+
+function webSearchPreview(item, detail) {
+  const action = item?.action || {};
+  return action.url || action.query || item?.query || detail || "webSearch";
+}
+
+function webSearchBlockDetail(block) {
+  return webSearchDetail({ query: block?.query, action: block?.action });
+}
+
 function stringifyCompact(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -1666,6 +2435,7 @@ function renderTimeline() {
       <span class="source">${escapeHtml(sourceLabel(event.source))}</span>
       <span class="dir">${event.dir || ""}</span>
       <span class="method">${escapeHtml(methodLabel(event))}</span>
+      <span class="item" title="${escapeHtml(eventItemLabel(event))}">${escapeHtml(eventItemLabel(event))}</span>
       <span class="ids">${escapeHtml([shortId(event.sessionId), shortId(event.threadId), shortId(event.turnId), shortId(event.itemId)].filter(Boolean).join(" / "))}</span>
       <span class="summary">${escapeHtml(truncateInline(event.summary || "", maxTimelineSummaryChars))}</span>
     `;
@@ -1706,6 +2476,7 @@ function updateStatus(status) {
     : "storage off";
   els.statusLine.textContent = `${sourceState} | seq ${status?.lastSeq ?? 0} | buffered ${status?.bufferedEvents ?? 0} | ingested ${status?.totalIngested ?? 0} | restored ${status?.totalRestored ?? 0} | ${storageLabel} | http ${status?.clients ?? 0} | ingest ${status?.ingestClients ?? 0} | ${status?.ingest ?? ""}`;
   scheduleStorageRefresh(false);
+  scheduleTokenUsageRefresh(false);
 }
 
 function addEvent(event) {
@@ -1715,7 +2486,7 @@ function addEvent(event) {
   if (state.events.length > max) {
     state.events.splice(0, state.events.length - max);
   }
-  scheduleRender();
+  if (state.activeTab === "timeline") scheduleRender();
 }
 
 function escapeHtml(value) {
@@ -1749,6 +2520,31 @@ async function refreshStorage(force = false) {
   } catch {
     state.storage = state.storage || null;
   }
+}
+
+async function refreshTokenUsage(force = false) {
+  try {
+    const res = await fetch(`/api/token-usage${force ? "?force=1" : ""}`);
+    if (!res.ok) return;
+    state.tokenUsage = await res.json();
+    renderTokens();
+  } catch {
+    state.tokenUsage = state.tokenUsage || null;
+  }
+}
+
+function scheduleTokenUsageRefresh(force = false) {
+  if (force) {
+    void refreshTokenUsage(true);
+    return;
+  }
+  if (state.activeTab !== "tokens") return;
+  if (state.tokenUsageRefreshScheduled) return;
+  state.tokenUsageRefreshScheduled = true;
+  setTimeout(async () => {
+    state.tokenUsageRefreshScheduled = false;
+    await refreshTokenUsage(false);
+  }, 30000);
 }
 
 function scheduleStorageRefresh(force = false) {
@@ -1820,7 +2616,12 @@ function scheduleConversationRefresh() {
   setTimeout(async () => {
     state.conversationRefreshScheduled = false;
     await refreshConversationModel();
-    scheduleRender();
+    if (state.activeTab === "conversation") {
+      renderStorage();
+      renderSessionsAndConversation({ preserveConversation: true });
+    } else {
+      scheduleRender();
+    }
   }, 250);
 }
 
@@ -1839,12 +2640,22 @@ function connectSse() {
 }
 
 for (const el of [els.dirFilter, els.methodFilter, els.threadFilter, els.textFilter, els.limitInput]) {
-  el.addEventListener("input", render);
+  el.addEventListener("input", () => {
+    state.conversationViewSignature = "";
+    render();
+  });
 }
 
 els.conversationTabBtn.addEventListener("click", () => {
   state.activeTab = "conversation";
+  state.conversationViewSignature = "";
   render();
+});
+
+els.tokensTabBtn.addEventListener("click", () => {
+  state.activeTab = "tokens";
+  render();
+  void refreshTokenUsage(!state.tokenUsage);
 });
 
 els.timelineTabBtn.addEventListener("click", () => {
@@ -1866,18 +2677,48 @@ els.clearBtn.addEventListener("click", () => {
   state.selectedThreadId = "";
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
+  state.conversationViewSignature = "";
   closeDetail();
 });
 
 els.refreshStorageBtn.addEventListener("click", () => {
   void refreshStorage(true);
 });
+els.refreshTokensBtn.addEventListener("click", () => {
+  void refreshTokenUsage(true);
+});
 els.cleanupStorageBtn.addEventListener("click", () => {
   void cleanupStorage();
 });
+for (const table of [els.tokenThreadsTable, els.tokenTurnsTable]) {
+  table.addEventListener("click", (event) => {
+    const row = event.target.closest(".tokenDataRow");
+    if (!row) return;
+    const threadId = row.dataset.threadId || "";
+    const turnId = row.dataset.turnId || "";
+    const match = findSessionForThreadTurn(threadId, turnId);
+    if (!match) return;
+    state.activeTab = "conversation";
+    state.selectedSessionId = match.session.id;
+    state.expandedSessionId = match.session.id;
+    state.selectedThreadId = match.thread.id;
+    state.selectedTurnId = turnId;
+    state.selectedSegmentKey = "";
+    state.conversationViewSignature = "";
+    render();
+    requestAnimationFrame(() => {
+      if (turnId) {
+        scrollToTurnLifecycle(match.thread.id, turnId);
+      } else {
+        jumpToConversationElement(document.querySelector(`#thread-${cssSafeId(match.thread.id)}`), "start");
+      }
+    });
+  });
+}
 els.closeDetailBtn.addEventListener("click", closeDetail);
 els.turnSortBtn.addEventListener("click", () => {
   state.turnSortDescending = !state.turnSortDescending;
+  state.conversationViewSignature = "";
   render();
 });
 els.closeSegmentDetailBtn.addEventListener("click", () => {
