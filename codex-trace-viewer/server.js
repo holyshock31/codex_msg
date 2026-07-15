@@ -361,6 +361,7 @@ function updateConversationStore(event) {
   }
   if (!extracted) {
     conversationVersion += 1;
+    thread.version = conversationVersion;
     trimConversationSessions();
     return;
   }
@@ -374,6 +375,7 @@ function updateConversationStore(event) {
     if (!session.preview && extracted.block.preview) session.preview = extracted.block.preview;
   }
   conversationVersion += 1;
+  thread.version = conversationVersion;
   trimConversationSessions();
 }
 
@@ -468,6 +470,7 @@ function getConversationThread(session, id) {
       pendingTokenUsageByTurnId: new Map(),
       events: 0,
       blocks: 0,
+      version: 0,
       preview: "",
       lastTs: 0,
       source: "",
@@ -1045,7 +1048,13 @@ function trimConversationSessions() {
 function conversationModel() {
   const sessions = [...conversationSessions.values()].map(serializeConversationSession);
   sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
-  return { version: conversationVersion, sessions: groupTemporarySessions(sessions) };
+  return { version: conversationVersion, summary: false, sessions: groupTemporarySessions(sessions) };
+}
+
+function conversationSummaryModel() {
+  const sessions = [...conversationSessions.values()].map(serializeConversationSessionSummary);
+  sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+  return { version: conversationVersion, summary: true, sessions: groupTemporarySessions(sessions) };
 }
 
 function groupTemporarySessions(sessions) {
@@ -1133,6 +1142,26 @@ function serializeConversationSession(session) {
   };
 }
 
+function serializeConversationSessionSummary(session) {
+  const threads = session.threads.map(serializeConversationThreadSummary).sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+  const blocks = threads.reduce((sum, thread) => sum + thread.blocks, 0);
+  const turnCount = threads.reduce((sum, thread) => sum + thread.turnCount, 0);
+  return {
+    id: session.id,
+    sessionId: session.id,
+    title: session.title,
+    cwd: session.cwd,
+    preview: session.preview,
+    events: session.events,
+    blocks,
+    turnCount,
+    threadCount: threads.length,
+    lastTs: session.lastTs,
+    source: session.source || "local",
+    threads,
+  };
+}
+
 function serializeConversationThread(thread) {
   applyConversationThreadMetadata(thread, getThreadMetadata(thread.id));
   const turns = thread.turns.map(serializeConversationTurn).sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
@@ -1149,6 +1178,8 @@ function serializeConversationThread(thread) {
     preview: thread.preview,
     events: thread.events,
     blocks,
+    version: thread.version || 0,
+    turnCount: turns.length,
     lastTs: thread.lastTs,
     source: thread.source || "local",
     parentThreadId: thread.parentThreadId,
@@ -1157,6 +1188,36 @@ function serializeConversationThread(thread) {
     agentRole: thread.agentRole,
     ephemeral: thread.ephemeral,
     threadSource: thread.threadSource,
+    detailLoaded: true,
+    turns,
+  };
+}
+
+function serializeConversationThreadSummary(thread) {
+  applyConversationThreadMetadata(thread, getThreadMetadata(thread.id));
+  const turns = thread.turns.map(serializeConversationTurnSummary).sort((a, b) => (a.firstTs || 0) - (b.firstTs || 0));
+  return {
+    id: thread.id,
+    threadId: thread.id,
+    sessionId: thread.sessionId,
+    displaySessionId: thread.displaySessionId,
+    title: thread.title,
+    cwd: thread.cwd,
+    threadPreview: thread.threadPreview,
+    preview: thread.preview,
+    events: thread.events,
+    blocks: thread.blocks,
+    version: thread.version || 0,
+    turnCount: turns.length,
+    lastTs: thread.lastTs,
+    source: thread.source || "local",
+    parentThreadId: thread.parentThreadId,
+    forkedFromId: thread.forkedFromId,
+    agentNickname: thread.agentNickname,
+    agentRole: thread.agentRole,
+    ephemeral: thread.ephemeral,
+    threadSource: thread.threadSource,
+    detailLoaded: false,
     turns,
   };
 }
@@ -1178,6 +1239,37 @@ function serializeConversationTurn(turn) {
     tokenUsage: turn.tokenUsage || null,
     blocks,
   };
+}
+
+function serializeConversationTurnSummary(turn) {
+  const userBlock = turn.blocks.find((block) => block.role === "user");
+  const previewBlock = userBlock || turn.blocks.find((block) => block.preview || block.label);
+  const previewSource = previewBlock?.preview || previewBlock?.text || previewBlock?.label || "";
+  return {
+    id: turn.id,
+    firstTs: turn.firstTs,
+    status: turn.status,
+    durationMs: turn.durationMs,
+    startedAt: turn.startedAt ?? null,
+    completedAt: turn.completedAt ?? null,
+    startedTs: turn.startedTs || 0,
+    completedTs: turn.completedTs || 0,
+    startedSeq: turn.startedSeq ?? null,
+    completedSeq: turn.completedSeq ?? null,
+    error: turn.error ?? null,
+    tokenUsage: turn.tokenUsage || null,
+    blockCount: turn.blocks.length,
+    preview: truncateText(userFacingUserText(previewSource) || previewSource, 240),
+    blocks: [],
+  };
+}
+
+function findConversationThreadEntry(threadId) {
+  for (const session of conversationSessions.values()) {
+    const thread = session.threadsById?.get(threadId);
+    if (thread) return { session, thread };
+  }
+  return null;
 }
 
 function serializeConversationBlock(block) {
@@ -2100,11 +2192,17 @@ function threadMetadataList() {
   return [...threadMetadata.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
-function sendJson(res, value, statusCode = 200) {
+function sendJson(res, value, statusCode = 200, headers = {}) {
+  const serializeStartedAt = performance.now();
   const body = JSON.stringify(value);
+  const serializeMs = performance.now() - serializeStartedAt;
+  const serverTiming = [headers["server-timing"], `json;dur=${serializeMs.toFixed(1)}`].filter(Boolean).join(", ");
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    ...headers,
+    "server-timing": serverTiming,
+    "x-response-bytes": String(Buffer.byteLength(body)),
   });
   res.end(body);
 }
@@ -2199,7 +2297,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (url.pathname === "/api/conversations") {
-    sendJson(res, conversationModel());
+    const requestedVersion = Number(url.searchParams.get("version"));
+    if (Number.isFinite(requestedVersion) && requestedVersion === conversationVersion) {
+      sendJson(res, { version: conversationVersion, unchanged: true }, 200, { "x-trace-response-kind": "unchanged" });
+      return;
+    }
+    const buildStartedAt = performance.now();
+    const model = conversationModel();
+    sendJson(res, model, 200, { "server-timing": `model;dur=${(performance.now() - buildStartedAt).toFixed(1)}`, "x-trace-response-kind": "full" });
+    return;
+  }
+  if (url.pathname === "/api/conversations/summary") {
+    const requestedVersion = Number(url.searchParams.get("version"));
+    if (Number.isFinite(requestedVersion) && requestedVersion === conversationVersion) {
+      sendJson(res, { version: conversationVersion, summary: true, unchanged: true }, 200, { "x-trace-response-kind": "unchanged" });
+      return;
+    }
+    const buildStartedAt = performance.now();
+    const model = conversationSummaryModel();
+    sendJson(res, model, 200, { "server-timing": `model;dur=${(performance.now() - buildStartedAt).toFixed(1)}`, "x-trace-response-kind": "summary" });
+    return;
+  }
+  if (url.pathname === "/api/conversations/thread") {
+    const threadId = url.searchParams.get("threadId") || "";
+    const entry = findConversationThreadEntry(threadId);
+    if (!entry) {
+      sendJson(res, { error: "thread not found" }, 404);
+      return;
+    }
+    const buildStartedAt = performance.now();
+    const model = {
+      version: conversationVersion,
+      sessionId: entry.session.id,
+      thread: serializeConversationThread(entry.thread),
+    };
+    sendJson(res, model, 200, { "server-timing": `model;dur=${(performance.now() - buildStartedAt).toFixed(1)}`, "x-trace-response-kind": "thread" });
     return;
   }
   if (url.pathname === "/api/thread-metadata") {

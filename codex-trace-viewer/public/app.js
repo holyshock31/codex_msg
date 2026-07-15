@@ -16,6 +16,9 @@ const state = {
   tokenUsageRefreshScheduled: false,
   conversationModel: null,
   conversationRefreshScheduled: false,
+  conversationRefreshTimer: null,
+  conversationRefreshInFlight: false,
+  conversationRefreshDirty: false,
   conversationViewSignature: "",
   renderScheduled: false,
   turnSortDescending: true,
@@ -24,9 +27,29 @@ const state = {
 const maxDisplayedBlockChars = 16000;
 const maxStoredBlockChars = 32000;
 const maxTimelineSummaryChars = 600;
+const longItemGapMs = 30_000;
+const conversationRefreshVisibleMs = 1000;
+const conversationRefreshHiddenMs = 5000;
 const temporarySessionId = "__codex_trace_temporary_sessions__";
 const debugPerf = new URLSearchParams(window.location.search).get("debugPerf") === "1";
 const jumpFlashTimers = new WeakMap();
+const threadDetailRequests = new Map();
+const conversationPerf = {
+  modelRequests: 0,
+  modelActive: 0,
+  modelMaxActive: 0,
+  unchangedResponses: 0,
+  threadRequests: 0,
+  lastEndpoint: "",
+  lastBytes: 0,
+  lastDurationMs: 0,
+};
+function publishConversationPerf() {
+  if (!debugPerf) return;
+  window.__traceViewerPerf = conversationPerf;
+  document.documentElement.dataset.tracePerf = JSON.stringify(conversationPerf);
+}
+publishConversationPerf();
 const temporarySessionTitle = "临时会话";
 
 const els = {
@@ -107,8 +130,73 @@ function clockTime(ms) {
 
 function durationLabel(ms) {
   if (ms == null) return "";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  const value = Math.max(0, Number(ms) || 0);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  if (value < 10_000) return `${trimDecimal(value / 1000)}s`;
+  const totalSeconds = Math.round(value / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}h${minutes ? `${minutes}m` : ""}${seconds ? `${seconds}s` : ""}`;
+  return `${minutes}m${seconds ? `${seconds}s` : ""}`;
+}
+
+function trimDecimal(value) {
+  return value.toFixed(1).replace(/\.0$/, "");
+}
+
+function compactGapLabel(ms) {
+  if (ms == null) return "";
+  const value = Math.max(0, Number(ms) || 0);
+  if (value < 10_000) return `+${trimDecimal(value / 1000)}s`;
+  const totalSeconds = Math.round(value / 1000);
+  if (totalSeconds < 60) return `+${totalSeconds}s`;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `+${hours}h${minutes ? `${minutes}m` : ""}`;
+  return `+${minutes}m${seconds ? `${seconds}s` : ""}`;
+}
+
+function blockStartMs(block) {
+  return Number(block?.firstTs || block?.events?.[0]?.ts_ms || 0);
+}
+
+function blockEndMs(block) {
+  const events = block?.events || [];
+  return Number(block?.lastTs || events[events.length - 1]?.ts_ms || blockStartMs(block) || 0);
+}
+
+function turnStartMs(turn) {
+  return turnLifecycleTimeMs(turn, "start");
+}
+
+function turnEndMs(turn) {
+  return turnLifecycleTimeMs(turn, "end");
+}
+
+function turnDurationMs(turn) {
+  if (turn?.durationMs != null) {
+    const recorded = Number(turn.durationMs);
+    if (Number.isFinite(recorded) && recorded >= 0) return recorded;
+  }
+  const start = turnStartMs(turn);
+  const end = turnEndMs(turn) || Math.max(0, ...(turn?.blocks || []).map(blockEndMs));
+  if (!start || !end || end < start) return null;
+  return end - start;
+}
+
+function blockTimingMap(turn) {
+  const timing = new Map();
+  let previousStart = turnStartMs(turn);
+  for (const block of turn?.blocks || []) {
+    const startMs = blockStartMs(block);
+    const gapMs = startMs && previousStart ? Math.max(0, startMs - previousStart) : null;
+    timing.set(block, { startMs, gapMs });
+    if (startMs) previousStart = startMs;
+  }
+  return timing;
 }
 
 function methodLabel(event) {
@@ -426,7 +514,8 @@ function renderSessionsAndConversation(options = {}) {
   renderSessionList(model.sessions);
   const selected = model.sessions.find((session) => session.id === state.selectedSessionId);
   const expanded = model.sessions.find((session) => session.id === state.expandedSessionId);
-  if (selected) ensureSelectedThread(selected);
+  const selectedThread = selected ? ensureSelectedThread(selected) : null;
+  if (selectedThread?.detailLoaded === false) void ensureConversationThreadDetail(selectedThread.id);
   renderTurnOverlay(expanded);
   const nextSignature = conversationViewSignature(selected);
   if (preserveConversation && nextSignature && nextSignature === state.conversationViewSignature) {
@@ -481,6 +570,14 @@ function filteredConversationModel() {
     let turnCount = 0;
     let preview = "";
     for (const thread of session.threads || legacyThreads(session)) {
+      if (thread.detailLoaded === false) {
+        filteredThreads.push(thread);
+        blocks += thread.blocks || 0;
+        events += thread.events || 0;
+        turnCount += thread.turnCount || thread.turns?.length || 0;
+        if (!preview) preview = thread.preview || thread.threadPreview || "";
+        continue;
+      }
       const filteredTurns = [];
       let threadEvents = 0;
       let threadBlocks = 0;
@@ -592,42 +689,63 @@ function blockSearchText(block, session, threadModel, turn) {
     .toLowerCase();
 }
 
+function sessionRenderSignature(session) {
+  return [
+    sessionTitle(session),
+    session.source || "",
+    session.threadCount || sessionThreads(session).length,
+    session.turnCount || countTurns(session),
+    session.blocks || 0,
+    session.events || 0,
+    session.preview || "",
+  ].join("\u001f");
+}
+
+function createSessionListItem(session, signature) {
+  const item = document.createElement("div");
+  item.className = "sessionItem";
+  item.dataset.sessionId = session.id;
+  item.dataset.renderSignature = signature;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "sessionRow";
+  button.title = `${sessionTitle(session)}\n${session.id}`;
+  button.innerHTML = `
+    <span class="sessionName">${escapeHtml(sessionTitle(session))}</span>
+    <span class="sessionId">${escapeHtml(sourceLabel(session.source))} / ${escapeHtml(shortId(session.id))}</span>
+    <span class="sessionStats">${session.threadCount || sessionThreads(session).length} threads / ${session.turnCount || countTurns(session)} turns / ${session.blocks} blocks / ${session.events} events</span>
+    <span class="sessionPreview">${escapeHtml(session.preview || "")}</span>
+  `;
+  button.addEventListener("click", () => {
+    const switchingSession = state.selectedSessionId !== session.id;
+    state.selectedSessionId = session.id;
+    state.expandedSessionId = session.id;
+    if (switchingSession) {
+      state.selectedThreadId = "";
+      state.selectedTurnId = "";
+      state.selectedSegmentKey = "";
+      state.conversationViewSignature = "";
+    }
+    render();
+  });
+  item.appendChild(button);
+  return item;
+}
+
 function renderSessionList(sessions) {
   els.sessionCountLine.textContent = `${sessions.length}`;
-  els.sessionList.innerHTML = "";
+  const existing = new Map(Array.from(els.sessionList.children).map((item) => [item.dataset.sessionId, item]));
   const fragment = document.createDocumentFragment();
   for (const session of sessions) {
-    const item = document.createElement("div");
-    item.className = "sessionItem";
-    if (session.id === state.selectedSessionId) item.classList.add("selected");
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "sessionRow";
-    if (session.id === state.selectedSessionId) button.classList.add("selected");
-    button.title = `${sessionTitle(session)}\n${session.id}`;
-    button.innerHTML = `
-      <span class="sessionName">${escapeHtml(sessionTitle(session))}</span>
-      <span class="sessionId">${escapeHtml(sourceLabel(session.source))} / ${escapeHtml(shortId(session.id))}</span>
-      <span class="sessionStats">${session.threadCount || sessionThreads(session).length} threads / ${session.turnCount || countTurns(session)} turns / ${session.blocks} blocks / ${session.events} events</span>
-      <span class="sessionPreview">${escapeHtml(session.preview || "")}</span>
-    `;
-    button.addEventListener("click", () => {
-      const switchingSession = state.selectedSessionId !== session.id;
-      state.selectedSessionId = session.id;
-      state.expandedSessionId = session.id;
-      if (switchingSession) {
-        state.selectedThreadId = "";
-        state.selectedTurnId = "";
-        state.selectedSegmentKey = "";
-        state.conversationViewSignature = "";
-      }
-      render();
-    });
-    item.appendChild(button);
+    const signature = sessionRenderSignature(session);
+    const previous = existing.get(session.id);
+    const item = previous?.dataset.renderSignature === signature ? previous : createSessionListItem(session, signature);
+    const selected = session.id === state.selectedSessionId;
+    item.classList.toggle("selected", selected);
+    item.querySelector(".sessionRow")?.classList.toggle("selected", selected);
     fragment.appendChild(item);
   }
-  els.sessionList.appendChild(fragment);
+  els.sessionList.replaceChildren(fragment);
 }
 
 function renderTurnOverlay(session) {
@@ -671,11 +789,15 @@ function renderTurnOverlay(session) {
     fragment.appendChild(threadHeader);
     numberedTurnsForNav(threadModel).forEach(({ turn, number }) => {
       const button = document.createElement("button");
+      const duration = turnDurationMs(turn);
+      const durationText = duration != null ? durationLabel(duration) : "";
+      const blockCount = turn.blockCount ?? turn.blocks.length;
       button.type = "button";
       button.className = "sessionTurnRow";
       if (turn.id === state.selectedTurnId && threadModel.id === state.selectedThreadId) button.classList.add("active");
       button.title = [
-        `${shortId(threadModel.id)} / Turn ${number} / ${shortId(turn.id)} / ${turn.blocks.length} segments`,
+        `${shortId(threadModel.id)} / Turn ${number} / ${shortId(turn.id)} / ${blockCount} segments`,
+        durationText ? `Duration: ${durationText}` : "",
         tokenUsageTitle(turn),
       ].filter(Boolean).join("\n");
       button.dataset.threadId = threadModel.id;
@@ -683,7 +805,10 @@ function renderTurnOverlay(session) {
       button.innerHTML = `
         <span class="turnRailIndex">${number}</span>
         <span class="turnRailText">${escapeHtml(turnLabel(turn, number))}</span>
-        <span class="turnRailCount">${turn.blocks.length}</span>
+        <span class="turnRailMeta">
+          ${durationText ? `<span class="turnRailDuration">${escapeHtml(durationText)}</span>` : ""}
+          <span class="turnRailCount">${blockCount}</span>
+        </span>
       `;
       button.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -735,6 +860,13 @@ function renderConversation(session) {
     `${activeThreadBlocks || session.blocks} blocks`,
   ].filter(Boolean).join(" / ");
 
+  if (activeThread?.detailLoaded === false) {
+    els.conversationMessages.innerHTML = `<div class="emptyState">Loading thread...</div>`;
+    renderSegmentRail(null, null);
+    renderSegmentDetail(null);
+    return;
+  }
+
   els.conversationMessages.innerHTML = "";
   const fragment = document.createDocumentFragment();
   const visibleThreads = activeThread ? [activeThread] : [];
@@ -744,17 +876,22 @@ function renderConversation(session) {
     for (const { turn, number } of numberedTurnsForDisplay(threadModel)) {
       if (!defaultRailTurn) defaultRailTurn = { thread: threadModel, turn };
       const blocks = blocksWithDisplayNumbers(turn);
+      const timingByBlock = blockTimingMap(turn);
       if (state.turnSortDescending) {
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "end"));
         for (const { block, number } of blocks) {
-          fragment.appendChild(segmentCard(block, threadModel, turn, number));
+          const timing = timingByBlock.get(block) || {};
+          fragment.appendChild(segmentCard(block, threadModel, turn, number, timing));
+          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs));
           renderedBlocks += 1;
         }
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
       } else {
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
         for (const { block, number } of blocks) {
-          fragment.appendChild(segmentCard(block, threadModel, turn, number));
+          const timing = timingByBlock.get(block) || {};
+          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs));
+          fragment.appendChild(segmentCard(block, threadModel, turn, number, timing));
           renderedBlocks += 1;
         }
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "end"));
@@ -801,13 +938,15 @@ function turnLifecycleDivider(threadModel, turn, number, phase) {
   el.dataset.turnId = turn.id;
   el.dataset.phase = phase;
   el.tabIndex = 0;
-  el.title = [phase === "start" ? "Click to jump to turn end" : "Click to jump to turn start", tokenUsageTitle(turn)].filter(Boolean).join("\n\n");
+  const jumpTitle = phase === "start" ? "Click to jump to turn end" : "Click to jump to turn start";
   const phaseLabel = phase === "start" ? "start" : "end";
   const time = turnLifecycleTimeLabel(turn, phase);
-  const status = phase === "end" && turn.status ? ` / ${turn.status}` : "";
-  const duration = phase === "end" && turn.durationMs != null ? ` / ${durationLabel(turn.durationMs)}` : "";
+  const duration = phase === "end" ? turnDurationMs(turn) : null;
+  const durationText = duration != null ? `${turnEndMs(turn) ? "Worked" : "Running"} for ${durationLabel(duration)}` : "";
+  const endSummary = [durationText, turn.status].filter(Boolean).join(" · ");
+  el.title = [jumpTitle, phase === "end" ? [time, endSummary].filter(Boolean).join(" / ") : "", tokenUsageTitle(turn)].filter(Boolean).join("\n\n");
   el.innerHTML = `
-    <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(phaseLabel)} ${escapeHtml(shortId(turn.id))} / ${escapeHtml(time)}${status}${duration}</span>
+    <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(phaseLabel)} ${escapeHtml(shortId(turn.id))} / ${escapeHtml(time)}${endSummary ? ` / ${escapeHtml(endSummary)}` : ""}</span>
   `;
   const jump = () => {
     state.selectedThreadId = threadModel.id;
@@ -829,7 +968,8 @@ function turnLifecycleDivider(threadModel, turn, number, phase) {
 
 function turnLifecycleTimeLabel(turn, phase) {
   const ms = turnLifecycleTimeMs(turn, phase);
-  return ms ? clockTime(ms) : "not recorded";
+  if (ms) return clockTime(ms);
+  return phase === "end" && String(turn?.status || "").toLowerCase() === "inprogress" ? "in progress" : "not recorded";
 }
 
 function turnLifecycleTimeMs(turn, phase) {
@@ -911,6 +1051,7 @@ function scrollToTurnLifecycle(threadId, turnId, phase = null, block = "start") 
 }
 
 function turnLabel(turn, number) {
+  if (turn.preview) return turn.preview;
   const user = turn.blocks.find((block) => block.role === "user");
   if (user) return userFacingUserText(blockText(user)) || user.preview || user.label || `Turn ${number}`;
   const first = turn.blocks.find((block) => block.preview || block.label);
@@ -957,7 +1098,10 @@ function renderSegmentRail(activeThread, railTurn) {
   }
 
   const fragment = document.createDocumentFragment();
+  const timingByBlock = blockTimingMap(railTurn.turn);
   blocks.forEach(({ block, number }) => {
+    const timing = timingByBlock.get(block) || {};
+    const gapText = compactGapLabel(timing.gapMs);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "segmentRailItem";
@@ -965,8 +1109,13 @@ function renderSegmentRail(activeThread, railTurn) {
     button.dataset.threadId = railTurn.thread.id;
     button.dataset.turnId = railTurn.turn.id;
     button.dataset.segmentKey = block.key;
-    button.title = `${number}. ${block.label || block.kind || "segment"} / ${block.meta || ""}`;
+    button.title = [
+      `${number}. ${block.label || block.kind || "segment"} / ${block.meta || ""}`,
+      timing.startMs ? `Started: ${clockTime(timing.startMs)}` : "",
+      timing.gapMs != null ? `Gap from previous item: ${durationLabel(timing.gapMs)}` : "",
+    ].filter(Boolean).join("\n");
     button.innerHTML = `
+      <span class="segmentRailGap">${escapeHtml(gapText)}</span>
       <span class="segmentRailNumber">${number}</span>
       <span class="segmentRailKind">${escapeHtml(segmentRailLabel(block))}</span>
     `;
@@ -1047,7 +1196,7 @@ function segmentDomSelector(threadId, turnId, segmentKey) {
   return `#${segmentDomId(threadId, turnId, segmentKey)}`;
 }
 
-function segmentCard(block, threadModel, turn, number = "") {
+function segmentCard(block, threadModel, turn, number = "", timing = {}) {
   const article = document.createElement("article");
   article.className = `messageBlock segmentCard role-${block.role}`;
   if (isContextCompactionBlock(block)) article.classList.add("contextCompactionMarker");
@@ -1058,8 +1207,10 @@ function segmentCard(block, threadModel, turn, number = "") {
   article.dataset.turnId = turn.id;
   article.dataset.segmentKey = block.key;
   article.dataset.segmentNumber = number;
+  const startText = timing.startMs ? clockTime(timing.startMs) : eventTime(block.events[0] || {});
+  const gapText = compactGapLabel(timing.gapMs);
   if (isContextCompactionBlock(block)) {
-    article.innerHTML = contextCompactionMarkup(block, number);
+    article.innerHTML = contextCompactionMarkup(block, number, timing);
     article.addEventListener("click", () => selectSegment(block, threadModel, turn));
     article.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -1075,7 +1226,8 @@ function segmentCard(block, threadModel, turn, number = "") {
       <span class="segmentNumberBadge">${escapeHtml(String(number))}</span>
       <span class="roleBadge">${escapeHtml(block.label)}</span>
       <span>${escapeHtml(block.meta)}</span>
-      <span>${escapeHtml(eventTime(block.events[0] || {}))}</span>
+      <span class="segmentStartTime">${escapeHtml(startText)}</span>
+      ${gapText ? `<span class="segmentGap" title="Gap from previous item: ${escapeHtml(durationLabel(timing.gapMs))}">${escapeHtml(gapText)}</span>` : ""}
       <span>${block.events.length} events</span>
     </div>
     <div class="segmentPreview">${escapeHtml(preview)}</div>
@@ -1094,10 +1246,11 @@ function isContextCompactionBlock(block) {
   return block?.meta === "contextCompaction" || block?.itemType === "contextCompaction";
 }
 
-function contextCompactionMarkup(block, number = "") {
+function contextCompactionMarkup(block, number = "", timing = {}) {
   const started = eventTime(block.events?.[0] || {});
   const completed = eventTime(block.events?.at?.(-1) || block.events?.[block.events.length - 1] || {});
   const duration = blockDurationLabel(block);
+  const gap = compactGapLabel(timing.gapMs);
   const itemId = block.itemId ? `item ${shortId(block.itemId)}` : "";
   const seqRange = block.firstSeq != null && block.lastSeq != null ? `seq ${block.firstSeq}-${block.lastSeq}` : "";
   return `
@@ -1105,10 +1258,18 @@ function contextCompactionMarkup(block, number = "") {
       <span class="contextCompactionRule"></span>
       <span class="segmentNumberBadge contextCompactionNumber">${escapeHtml(String(number))}</span>
       <span class="contextCompactionBadge">Context compacted</span>
-      <span class="contextCompactionMeta">${escapeHtml([itemId, started, completed && completed !== started ? `done ${completed}` : "", duration, seqRange, `${block.events?.length || 0} events`].filter(Boolean).join(" / "))}</span>
+      <span class="contextCompactionMeta">${escapeHtml([itemId, started, gap, completed && completed !== started ? `done ${completed}` : "", duration, seqRange, `${block.events?.length || 0} events`].filter(Boolean).join(" / "))}</span>
       <span class="contextCompactionRule"></span>
     </div>
   `;
+}
+
+function itemWaitDivider(gapMs) {
+  const el = document.createElement("div");
+  el.className = "itemWaitDivider";
+  el.setAttribute("aria-label", `Waited ${durationLabel(gapMs)}`);
+  el.innerHTML = `<span>waited ${escapeHtml(durationLabel(gapMs))}</span>`;
+  return el;
 }
 
 function blockDurationLabel(block) {
@@ -1479,6 +1640,7 @@ function countTurns(session) {
 }
 
 function countThreadBlocks(thread) {
+  if (thread?.detailLoaded === false) return thread.blocks || 0;
   return (thread?.turns || []).reduce((sum, turn) => sum + (turn.blocks?.length || 0), 0);
 }
 
@@ -2505,7 +2667,7 @@ function truncateInline(value, maxChars) {
 
 async function loadInitial() {
   const limit = Math.max(5000, Number(els.limitInput.value || "1000"));
-  const [eventsRes] = await Promise.all([fetch(`/api/events?limit=${encodeURIComponent(limit)}&compact=1`), refreshConversationModel(), refreshStorage(true)]);
+  const [eventsRes] = await Promise.all([fetch(`/api/events?limit=${encodeURIComponent(limit)}&compact=1`), refreshConversationModel({ hydrate: false }), refreshStorage(true)]);
   state.nextViewId = 1;
   state.events = (await eventsRes.json()).map(ingestEvent);
   render();
@@ -2600,36 +2762,174 @@ async function cleanupStorage() {
   }
 }
 
-async function refreshConversationModel() {
+function conversationThreadsById(model) {
+  const threads = new Map();
+  for (const session of model?.sessions || []) {
+    for (const thread of sessionThreads(session)) threads.set(thread.id, thread);
+  }
+  return threads;
+}
+
+function threadSummaryMatchesDetail(summary, detail) {
+  return Boolean(
+    detail?.detailLoaded &&
+    Number(summary?.version || 0) === Number(detail.version || 0) &&
+    Number(summary?.lastTs || 0) === Number(detail.lastTs || 0) &&
+    Number(summary?.events || 0) === Number(detail.events || 0) &&
+    Number(summary?.blocks || 0) === Number(detail.blocks || 0) &&
+    Number(summary?.turnCount || summary?.turns?.length || 0) === Number(detail.turnCount || detail.turns?.length || 0)
+  );
+}
+
+function mergeConversationSummary(nextModel) {
+  const previousThreads = conversationThreadsById(state.conversationModel);
+  for (const session of nextModel?.sessions || []) {
+    session.threads = sessionThreads(session).map((summaryThread) => {
+      const detail = previousThreads.get(summaryThread.id);
+      if (!threadSummaryMatchesDetail(summaryThread, detail)) return summaryThread;
+      return { ...summaryThread, turns: detail.turns, detailLoaded: true };
+    });
+  }
+  return nextModel;
+}
+
+function replaceConversationThread(response) {
+  const detail = response?.thread;
+  if (!detail || !state.conversationModel?.sessions) return false;
+  for (const session of state.conversationModel.sessions) {
+    const index = sessionThreads(session).findIndex((thread) => thread.id === detail.id);
+    if (index < 0) continue;
+    const current = session.threads[index];
+    if (Number(current?.lastTs || 0) > Number(detail.lastTs || 0)) return false;
+    session.threads[index] = { ...detail, detailLoaded: true };
+    state.conversationModel.version = Math.max(Number(state.conversationModel.version || 0), Number(response.version || 0));
+    return true;
+  }
+  return false;
+}
+
+function requestConversationThread(threadId) {
+  if (!threadId) return Promise.resolve(null);
+  const existing = threadDetailRequests.get(threadId);
+  if (existing) return existing;
+  conversationPerf.threadRequests += 1;
+  publishConversationPerf();
+  const request = fetch(`/api/conversations/thread?threadId=${encodeURIComponent(threadId)}`)
+    .then(async (res) => (res.ok ? res.json() : null))
+    .catch(() => null)
+    .finally(() => threadDetailRequests.delete(threadId));
+  threadDetailRequests.set(threadId, request);
+  return request;
+}
+
+async function ensureConversationThreadDetail(threadId) {
+  const current = conversationThreadsById(state.conversationModel).get(threadId);
+  if (!current || current.detailLoaded !== false) return Boolean(current);
+  const response = await requestConversationThread(threadId);
+  if (!replaceConversationThread(response)) return false;
+  state.conversationViewSignature = "";
+  renderSessionsAndConversation();
+  if (state.selectedThreadId === threadId && state.selectedTurnId) {
+    requestAnimationFrame(() => scrollToTurnLifecycle(threadId, state.selectedTurnId));
+  }
+  return true;
+}
+
+async function refreshConversationModel(options = {}) {
+  const perfStartedAt = performance.now();
+  conversationPerf.modelRequests += 1;
+  conversationPerf.modelActive += 1;
+  conversationPerf.modelMaxActive = Math.max(conversationPerf.modelMaxActive, conversationPerf.modelActive);
+  publishConversationPerf();
   try {
-    const res = await fetch("/api/conversations");
-    if (!res.ok) return;
-    state.conversationModel = await res.json();
+    const wantsSummary = !hasActiveConversationFilters();
+    const sameMode = Boolean(state.conversationModel?.summary) === wantsSummary;
+    const version = Number(state.conversationModel?.version);
+    const query = sameMode && Number.isFinite(version) ? `?version=${encodeURIComponent(version)}` : "";
+    const endpoint = wantsSummary ? "/api/conversations/summary" : "/api/conversations";
+    conversationPerf.lastEndpoint = endpoint;
+    const res = await fetch(`${endpoint}${query}`);
+    if (!res.ok) return false;
+    let nextModel = await res.json();
+    conversationPerf.lastBytes = Number(res.headers.get("x-response-bytes") || 0);
+    if (debugPerf) {
+      console.debug("[trace-viewer] refreshConversationModel", {
+        endpoint,
+        ms: Math.round((performance.now() - perfStartedAt) * 10) / 10,
+        bytes: conversationPerf.lastBytes,
+        kind: res.headers.get("x-trace-response-kind") || "",
+        serverTiming: res.headers.get("server-timing") || "",
+      });
+    }
+    if (nextModel.unchanged) {
+      conversationPerf.unchangedResponses += 1;
+      return false;
+    }
+    if (nextModel.summary) nextModel = mergeConversationSummary(nextModel);
+    state.conversationModel = nextModel;
+    if (options.hydrate !== false && nextModel.summary) {
+      if (!state.selectedSessionId || !nextModel.sessions.some((session) => session.id === state.selectedSessionId)) {
+        state.selectedSessionId = nextModel.sessions[0]?.id || "";
+        state.selectedThreadId = "";
+      }
+      const selectedSession = nextModel.sessions.find((session) => session.id === state.selectedSessionId);
+      const selectedThread = selectedSession ? ensureSelectedThread(selectedSession) : null;
+      if (selectedThread?.detailLoaded === false) {
+        const response = await requestConversationThread(selectedThread.id);
+        replaceConversationThread(response);
+      }
+    }
+    return true;
   } catch {
     state.conversationModel = state.conversationModel || null;
+    return false;
+  } finally {
+    conversationPerf.modelActive -= 1;
+    conversationPerf.lastDurationMs = Math.round((performance.now() - perfStartedAt) * 10) / 10;
+    publishConversationPerf();
   }
 }
 
-function scheduleConversationRefresh() {
-  if (state.conversationRefreshScheduled) return;
-  state.conversationRefreshScheduled = true;
-  setTimeout(async () => {
-    state.conversationRefreshScheduled = false;
-    await refreshConversationModel();
-    if (state.activeTab === "conversation") {
-      renderStorage();
-      renderSessionsAndConversation({ preserveConversation: true });
-    } else {
-      scheduleRender();
+function conversationRefreshDelay() {
+  return document.hidden ? conversationRefreshHiddenMs : conversationRefreshVisibleMs;
+}
+
+async function runConversationRefresh() {
+  state.conversationRefreshScheduled = false;
+  state.conversationRefreshTimer = null;
+  if (state.conversationRefreshInFlight || !state.conversationRefreshDirty) return;
+  state.conversationRefreshInFlight = true;
+  state.conversationRefreshDirty = false;
+  try {
+    const changed = await refreshConversationModel();
+    if (changed && !state.paused) {
+      if (state.activeTab === "conversation") {
+        renderStorage();
+        renderSessionsAndConversation({ preserveConversation: true });
+      } else {
+        scheduleRender();
+      }
     }
-  }, 250);
+  } finally {
+    state.conversationRefreshInFlight = false;
+    if (state.conversationRefreshDirty && !state.paused) scheduleConversationRefresh();
+  }
+}
+
+function scheduleConversationRefresh(options = {}) {
+  state.conversationRefreshDirty = true;
+  if (state.conversationRefreshInFlight || state.conversationRefreshScheduled) return;
+  state.conversationRefreshScheduled = true;
+  state.conversationRefreshTimer = setTimeout(() => {
+    void runConversationRefresh();
+  }, options.immediate ? 0 : conversationRefreshDelay());
 }
 
 function connectSse() {
   const source = new EventSource("/events?compact=1");
   source.addEventListener("event", (message) => {
     addEvent(JSON.parse(message.data));
-    scheduleConversationRefresh();
+    if (!state.paused) scheduleConversationRefresh();
   });
   source.addEventListener("status", (message) => {
     updateStatus(JSON.parse(message.data));
@@ -2639,10 +2939,19 @@ function connectSse() {
   };
 }
 
+document.addEventListener("visibilitychange", () => {
+  if (!state.conversationRefreshDirty || state.conversationRefreshInFlight) return;
+  if (state.conversationRefreshTimer) clearTimeout(state.conversationRefreshTimer);
+  state.conversationRefreshTimer = null;
+  state.conversationRefreshScheduled = false;
+  scheduleConversationRefresh({ immediate: !document.hidden });
+});
+
 for (const el of [els.dirFilter, els.methodFilter, els.threadFilter, els.textFilter, els.limitInput]) {
   el.addEventListener("input", () => {
     state.conversationViewSignature = "";
     render();
+    scheduleConversationRefresh({ immediate: true });
   });
 }
 
@@ -2666,7 +2975,14 @@ els.timelineTabBtn.addEventListener("click", () => {
 els.pauseBtn.addEventListener("click", () => {
   state.paused = !state.paused;
   els.pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+  if (state.paused && state.conversationRefreshTimer) {
+    clearTimeout(state.conversationRefreshTimer);
+    state.conversationRefreshTimer = null;
+    state.conversationRefreshScheduled = false;
+    state.conversationRefreshDirty = false;
+  }
   render();
+  if (!state.paused) scheduleConversationRefresh({ immediate: true });
 });
 
 els.clearBtn.addEventListener("click", () => {
