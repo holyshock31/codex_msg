@@ -2,6 +2,10 @@
 codex-trace-viewer/logs/
 *.log
 *.pid
+events.ndjson
+trace-*.ndjson
+review-store/
+.codex-trace/
 
 # Local machine configuration
 codex-trace-wrapper/config.toml

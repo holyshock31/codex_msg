@@ -488,7 +488,7 @@ CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45124
 本机 WSL2 NAT 模式下，如果不走 SSH tunnel，远端 wrapper 可直接连 Windows host gateway，例如当前机器查到的是：
 
 ```text
-CODEX_TRACE_DAEMON_URL=tcp://<windows-host-gateway>:45124
+CODEX_TRACE_DAEMON_URL=tcp://<windows-host-ip>:45124
 ```
 
 6. 重启 Codex Desktop，连接远端会话。viewer Timeline 应出现 `source=remote`、`transport=ssh-proxy-websocket` 的 `trace/status` 和 JSON-RPC event。

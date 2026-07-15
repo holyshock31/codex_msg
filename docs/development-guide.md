@@ -4,10 +4,10 @@
 
 ## 开发目录
 
-当前源码目录示例：
+下文假设 PowerShell 当前位于克隆后的仓库根目录：
 
-```text
-<clone-directory>
+```powershell
+$RepoRoot = (Resolve-Path .).Path
 ```
 
 主要模块：
@@ -32,7 +32,6 @@ dist/
 ## 启动开发版 Viewer
 
 ```powershell
-cd <clone-directory>
 .\codex-trace.ps1 start
 ```
 
@@ -51,15 +50,13 @@ http://127.0.0.1:45123/?v=chat-redesign
 
 `codex-trace-viewer\scripts\start-viewer.ps1`、`stop-viewer.ps1`、`status-viewer.ps1` 保留给组件级调试。Review storage 是 viewer 内部能力，不需要单独启动。
 
-`start` 不会拷贝 wrapper exe，也不会设置 `CODEX_CLI_PATH`。需要从源码目录执行完整初始化时，先构建 wrapper，再运行：
+`start` 不会拷贝 wrapper exe，也不会设置 `CODEX_CLI_PATH`。从源码目录执行完整初始化时直接运行：
 
 ```powershell
-cd <clone-directory>\codex-trace-wrapper
-.\scripts\build-release.ps1
-
-cd <clone-directory>
 .\codex-trace.ps1 install
 ```
+
+如果 wrapper 尚未构建，`install` 会自动调用 Go 构建。
 
 如果需要捕获 `rawResponseItem/completed` 这类原始 Responses item 通知，可以在安装后的 `bin\config.toml` 或开发配置中打开：
 
@@ -73,14 +70,15 @@ enable_experimental_raw_events = true
 ## 构建 Wrapper
 
 ```powershell
-cd <clone-directory>\codex-trace-wrapper
+cd .\codex-trace-wrapper
 .\scripts\build-release.ps1
+cd ..
 ```
 
 输出：
 
-```text
-<clone-directory>\codex-trace-wrapper\dist\codex-trace-wrapper.exe
+```powershell
+Join-Path $RepoRoot "codex-trace-wrapper\dist\codex-trace-wrapper.exe"
 ```
 
 验证：
@@ -92,7 +90,6 @@ go test ./...
 Viewer 语法检查：
 
 ```powershell
-cd <clone-directory>
 node --check .\codex-trace-viewer\server.js
 node --check .\codex-trace-viewer\public\app.js
 ```
@@ -104,7 +101,6 @@ node --check .\codex-trace-viewer\public\app.js
 受管理环境环境不要把 `CODEX_CLI_PATH` 直接指向 D 盘源码目录。开发构建完成后，推荐直接走总入口安装：
 
 ```powershell
-cd <clone-directory>
 .\codex-trace.ps1 install
 ```
 
@@ -131,14 +127,13 @@ cd <clone-directory>
 对外不要直接压缩源码目录。使用 release 打包脚本：
 
 ```powershell
-cd <clone-directory>
 .\scripts\build-release-package.ps1
 ```
 
 输出：
 
-```text
-<clone-directory>\dist\CodexTrace.zip
+```powershell
+Join-Path $RepoRoot "dist\CodexTrace.zip"
 ```
 
 release zip 的目标结构：
@@ -217,7 +212,7 @@ CodexTrace.zip
 组织安全策略可能阻止 Codex Desktop 从以下位置启动 wrapper：
 
 ```text
-<local-path>\...
+<clone-directory>\...
 C:\Users\<user>\AppData\Local\...
 Temp
 Downloads

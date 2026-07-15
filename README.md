@@ -2,6 +2,29 @@
 
 这是一个 Codex Desktop 本地 trace viewer：不修改 Codex Desktop 安装包，通过 `CODEX_CLI_PATH` 让 Desktop 先启动 wrapper，再由 wrapper 透明转发 app-server stdio，并把消息复制到本地 viewer。
 
+## 全新 Windows 快速开始
+
+前置条件：
+
+- Windows 10/11 和 Codex Desktop。
+- Git。
+- Go 1.22+，用于首次安装时自动构建 wrapper。
+- Node.js 20+，用于运行 viewer。
+
+```powershell
+git clone https://github.com/holyshock31/codex_msg.git
+cd codex_msg
+.\codex-trace.ps1 install
+```
+
+源码克隆不提交编译产物。首次执行 `install` 时，如果本地没有 wrapper exe，安装脚本会自动运行 Go 构建，然后复制到 `%USERPROFILE%\Documents\CodexTrace`、设置用户级环境变量并启动 viewer。
+
+安装结束后完全退出并重新打开 Codex Desktop。Viewer 地址：
+
+```text
+http://127.0.0.1:45123/
+```
+
 ## 日常入口
 
 日常只需要记一个脚本：
@@ -47,7 +70,7 @@ tools/                 # 发布包模板配置
 docs/                  # 中文文档
 ```
 
-受管理环境分发时不要让 `CODEX_CLI_PATH` 指向源码目录、D 盘开发目录、`AppData\Local`、`Temp` 或 `Downloads`。已验证的默认安装位置是：
+某些终端安全软件会阻止 Codex Desktop 从源码目录、`AppData\Local`、`Temp` 或 `Downloads` 启动未签名 wrapper。已验证的默认安装位置是：
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe

@@ -19,7 +19,6 @@ codex-trace-wrapper.exe
 日常从项目根目录启动，不要分别启动 wrapper、viewer、storage：
 
 ```powershell
-cd <clone-directory>
 .\codex-trace.ps1 start
 ```
 
@@ -122,9 +121,7 @@ Timeline 标签保留最近原始事件列表和 raw JSON 调试入口。
 ## 验证
 
 ```powershell
-cd <clone-directory>\codex-trace-viewer
-node --check server.js
-node --check public\app.js
-cd <clone-directory>
+node --check .\codex-trace-viewer\server.js
+node --check .\codex-trace-viewer\public\app.js
 .\codex-trace.ps1 test-storage
 ```

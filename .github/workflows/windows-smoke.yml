@@ -1,0 +1,41 @@
+name: Windows smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  source-install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+      - name: Test wrapper
+        working-directory: codex-trace-wrapper
+        run: go test ./...
+      - name: Check viewer syntax
+        run: |
+          node --check .\codex-trace-viewer\server.js
+          node --check .\codex-trace-viewer\public\app.js
+      - name: Install from a clean source checkout
+        shell: powershell
+        run: .\codex-trace.ps1 install -NoEnable -NoStartViewer -InstallRoot (Join-Path $env:RUNNER_TEMP "CodexTrace")
+      - name: Verify installed files
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "CodexTrace"
+          if (-not (Test-Path (Join-Path $root "bin\codex-trace-wrapper.exe"))) { throw "wrapper missing" }
+          if (-not (Test-Path (Join-Path $root "bin\config.toml"))) { throw "config missing" }
+          if (-not (Test-Path (Join-Path $root "codex-trace-viewer\server.js"))) { throw "viewer missing" }
+      - name: Build install package
+        shell: powershell
+        run: .\scripts\build-release-package.ps1 -SkipBuild
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexTrace-windows
+          path: dist/CodexTrace.zip

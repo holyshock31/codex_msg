@@ -43,7 +43,7 @@ Timeline / Full info = 给人调试，保留协议事件
 
 ## 受管理环境安装路径与终端安全软件
 
-受管理环境电脑可能安装 OfficeScan / Trend Micro / 亚信安全等终端安全软件。实测这些软件可能阻止 Codex Desktop 从部分用户可写目录启动外部未签名 exe，Codex Desktop 日志里通常表现为 `spawn EPERM`。
+部分企业电脑安装的终端安全软件可能阻止 Codex Desktop 从用户可写目录启动外部未签名 exe，Codex Desktop 日志里通常表现为 `spawn EPERM`。
 
 已验证：
 
@@ -53,7 +53,7 @@ Timeline / Full info = 给人调试，保留协议事件
 
 使用约定：
 
-- 源码和 viewer 可以继续放在 `<clone-directory>`。
+- 源码和 viewer 可以继续放在任意克隆目录。
 - `CODEX_CLI_PATH` 必须指向安装目录下的 wrapper exe：
 
 ```text

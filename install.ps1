@@ -127,40 +127,92 @@ function Stop-CodexTraceViewer {
   $pidFile = Join-Path $viewerRoot "logs\viewer.pid"
   $viewerPort = if ($env:CODEX_TRACE_VIEWER_PORT) { [int]$env:CODEX_TRACE_VIEWER_PORT } else { 45123 }
   $ingestPort = if ($env:CODEX_TRACE_INGEST_PORT) { [int]$env:CODEX_TRACE_INGEST_PORT } else { 45124 }
-  $processIds = @()
-
-  if (Test-Path -LiteralPath $pidFile -PathType Leaf) {
-    $pidValue = (Get-Content -LiteralPath $pidFile -Raw).Trim()
-    if ($pidValue -match '^\d+$') {
-      $processIds += [int]$pidValue
+  if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+    $listeners = @(foreach ($port in @($viewerPort, $ingestPort)) {
+      Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    })
+    if ($listeners.Count -gt 0) {
+      $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+      throw "Viewer pid file is missing under $Root, but the trace ports are in use by process(es): $($owners -join ', '). Refusing to stop an unverified process."
     }
-  }
-
-  foreach ($port in @($viewerPort, $ingestPort)) {
-    $connections = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    foreach ($connection in $connections) {
-      if ($connection.OwningProcess -and $connection.OwningProcess -ne 0) {
-        $processIds += [int]$connection.OwningProcess
-      }
-    }
-  }
-
-  $processIds = @($processIds | Select-Object -Unique)
-  if ($processIds.Count -eq 0) {
     return
   }
 
-  foreach ($processId in $processIds) {
-    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-      continue
-    }
-    Write-Host "Stopping existing viewer process $processId ($($process.ProcessName))."
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+  $pidValue = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+  if ($pidValue -notmatch '^\d+$') {
+    throw "Viewer pid file is invalid: $pidFile"
   }
 
+  $processId = [int]$pidValue
+  $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+  if ($null -eq $process) {
+    Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
+    return
+  }
+  if ($process.ProcessName -ne "node") {
+    throw "PID $processId belongs to $($process.ProcessName), not Node.js. Refusing to stop it."
+  }
+
+  $ownedListeners = @(foreach ($port in @($viewerPort, $ingestPort)) {
+    Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $_.OwningProcess -eq $processId }
+  })
+  if ($ownedListeners.Count -eq 0) {
+    throw "PID $processId does not own the configured trace ports. Refusing to stop it."
+  }
+
+  Write-Host "Stopping existing viewer process $processId ($($process.ProcessName))."
+  Stop-Process -Id $processId -Force -ErrorAction Stop
   Start-Sleep -Milliseconds 500
   Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
+}
+
+function Build-CodexTraceWrapperFromSource {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourceRoot,
+    [Parameter(Mandatory = $true)][string]$OutputPath
+  )
+
+  $buildScript = Join-Path $SourceRoot "codex-trace-wrapper\scripts\build-release.ps1"
+  $wrapperMain = Join-Path $SourceRoot "codex-trace-wrapper\cmd\codex-trace-wrapper\main.go"
+  if (-not (Test-Path -LiteralPath $buildScript -PathType Leaf) -or -not (Test-Path -LiteralPath $wrapperMain -PathType Leaf)) {
+    return $false
+  }
+
+  $goCommand = Get-Command go -ErrorAction SilentlyContinue
+  if ($null -eq $goCommand) {
+    throw "This is a source checkout and the wrapper has not been built. Install Go 1.22 or newer, reopen PowerShell, and rerun .\codex-trace.ps1 install."
+  }
+
+  Write-Host "Wrapper executable not found; building it from source with $($goCommand.Source)."
+  & $buildScript
+  if (-not (Test-Path -LiteralPath $OutputPath -PathType Leaf)) {
+    throw "Wrapper build completed without creating: $OutputPath"
+  }
+
+  return $true
+}
+
+function Assert-CodexTraceNodeRuntime {
+  param([Parameter(Mandatory = $true)][string]$SourceRoot)
+
+  $bundledNode = Join-Path $SourceRoot "runtime\node.exe"
+  if (Test-Path -LiteralPath $bundledNode -PathType Leaf) {
+    return
+  }
+
+  $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+  if ($null -eq $nodeCommand) {
+    throw "Node.js 20 or newer is required to run the viewer. Install Node.js, reopen PowerShell, and rerun .\codex-trace.ps1 install."
+  }
+
+  $nodeVersion = (& $nodeCommand.Source --version).Trim()
+  if ($nodeVersion -notmatch '^v(?<major>\d+)\.') {
+    throw "Could not determine the Node.js version from: $nodeVersion"
+  }
+  if ([int]$Matches.major -lt 20) {
+    throw "Node.js 20 or newer is required to run the viewer. Found $nodeVersion at $($nodeCommand.Source)."
+  }
 }
 
 $SourceRoot = (Resolve-Path $PSScriptRoot).Path
@@ -186,6 +238,8 @@ if (Test-Path -Path $packageWrapper -PathType Leaf) {
   $wrapperSource = $packageWrapper
 } elseif (Test-Path -Path $sourceBuildWrapper -PathType Leaf) {
   $wrapperSource = $sourceBuildWrapper
+} elseif (Build-CodexTraceWrapperFromSource -SourceRoot $SourceRoot -OutputPath $sourceBuildWrapper) {
+  $wrapperSource = $sourceBuildWrapper
 } else {
   throw "Wrapper executable not found. Expected bin\codex-trace-wrapper.exe in a release package, or codex-trace-wrapper\dist\codex-trace-wrapper.exe in a source checkout. Build the wrapper first."
 }
@@ -200,7 +254,13 @@ if (Test-Path -Path $packageConfig -PathType Leaf) {
   throw "Wrapper config not found. Expected bin\config.toml in a release package, or codex-trace-wrapper\config.toml in a source checkout."
 }
 
-Stop-CodexTraceViewer -Root $InstallRoot
+if (-not $NoStartViewer) {
+  Assert-CodexTraceNodeRuntime -SourceRoot $SourceRoot
+}
+
+if (-not $NoStartViewer) {
+  Stop-CodexTraceViewer -Root $InstallRoot
+}
 
 $sameRoot = [string]::Equals($SourceRoot.TrimEnd('\'), $InstallRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)
 if (-not $sameRoot) {
@@ -250,5 +310,11 @@ if (-not $NoStartViewer) {
 
 Write-Host ""
 Write-Host "Codex Trace installed at: $InstallRoot"
-Write-Host "Viewer URL: http://127.0.0.1:45123/?v=chat-redesign"
-Write-Host "Restart Codex Desktop after first install or after re-enabling trace."
+if ($NoStartViewer) {
+  Write-Host "Viewer start skipped."
+} else {
+  Write-Host "Viewer URL: http://127.0.0.1:45123/?v=chat-redesign"
+}
+if (-not $NoEnable) {
+  Write-Host "Restart Codex Desktop after first install or after re-enabling trace."
+}
