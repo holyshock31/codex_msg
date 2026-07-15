@@ -1,16 +1,25 @@
 # Codex Message Trace Viewer
 
-Codex Message Trace Viewer 是一个面向 Codex Desktop 的本地旁路监测与会话分析工具。它捕获 Codex Desktop 与 `codex app-server` 之间的消息流，并将原始协议事件整理成更适合排查问题的 session、turn 和 item 视图。
+Codex Message Trace Viewer 是一个面向 Codex Desktop 的本地消息追踪与查看工具。
 
-本项目主要用于回答这些问题：
+Codex Desktop 的常规对话界面以任务交互为主，不会完整展示 Desktop 与 `codex app-server` 交互过程中的所有消息细节。例如，部分生命周期事件、中间增量、原始请求与响应、工具参数、内部标识、时间戳和关联关系可能被折叠、简化，或者根本不出现在界面中。
 
-- 一个 turn 为什么耗时很长，时间花在了哪个 item 上？
-- Codex 实际发送和接收了哪些 app-server 事件？
-- thinking、工具调用、命令输出、文件修改和模型回复之间是什么顺序？
-- side chat、subagent 和 fork thread 如何归属到原始会话？
-- 页面卡顿、跳转、连接等待或数据刷新问题发生在哪个环节？
+本项目的核心目的，是在不改变 Codex 主链路的前提下复制并保留这份消息流，然后提供两个互补的查看方式：
 
-项目不修改 Codex Desktop 安装包。当前正式支持 Windows 10/11，macOS 和 Linux 支持在路线图中。
+- Conversation：将原始事件整理成 session、turn 和 item，方便按会话阅读。
+- Timeline / Full info：尽量保留完整协议事件、原始字段和上下文，方便检查消息细节。
+
+在完整 trace 的基础上，可以进一步用于：
+
+- 查看 Codex 实际发送和接收了哪些 app-server 消息。
+- 还原 user、assistant、thinking、工具调用、命令和文件修改的事件顺序。
+- 分析 turn 持续时间以及 item 之间的时间间隔。
+- 理解 side chat、subagent、fork thread 与原始会话的关联关系。
+- 排查常规 Codex 界面没有展示或展示不完整的协议与执行信息。
+
+本项目不会改变 agent 的推理能力、模型行为或 Codex Desktop 的执行性能，也不修改 Codex Desktop 安装包。viewer 自身的页面卡顿、跳转和数据刷新优化属于本项目的内部工程优化，单独记录在 [本项目优化记录](本项目优化记录.md)中，不是对 Codex 本身的优化。
+
+当前正式支持 Windows 10/11，macOS 和 Linux 支持在路线图中。
 
 ## 主要能力
 
