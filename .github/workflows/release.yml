@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -37,12 +39,20 @@ jobs:
         run: |
           $hash = (Get-FileHash .\dist\CodexTrace.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  CodexTrace.zip" | Set-Content .\dist\CodexTrace.zip.sha256 -Encoding ascii
+      - name: Create SBOM
+        shell: powershell
+        run: .\scripts\generate-sbom.ps1 -PackagePath .\dist\CodexTrace.zip -OutputPath .\dist\CodexTrace.cdx.json -Version $env:GITHUB_REF_NAME
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/CodexTrace.zip
       - uses: actions/upload-artifact@v4
         with:
           name: CodexTrace-windows-${{ github.ref_name }}
           path: |
             dist/CodexTrace.zip
             dist/CodexTrace.zip.sha256
+            dist/CodexTrace.cdx.json
       - name: Publish GitHub release
         shell: powershell
         env:
@@ -51,6 +61,7 @@ jobs:
           gh release create $env:GITHUB_REF_NAME `
             .\dist\CodexTrace.zip `
             .\dist\CodexTrace.zip.sha256 `
+            .\dist\CodexTrace.cdx.json `
             --verify-tag `
             --generate-notes `
             --title $env:GITHUB_REF_NAME

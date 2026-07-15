@@ -2,6 +2,8 @@
 
 本文档面向安装和使用者。目标是拿到 `CodexTrace.zip` 后，用固定目录安装并启动本地 Codex Trace Viewer。
 
+发布包使用 MIT License，许可证文件随 ZIP 和安装目录分发。
+
 ## 推荐方式
 
 推荐使用 zip 包分发：

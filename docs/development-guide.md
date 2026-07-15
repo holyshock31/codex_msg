@@ -222,7 +222,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会运行 Go、Node 和 Review Store 测试，构建 `CodexTrace.zip`，生成 `CodexTrace.zip.sha256`，并把两个文件发布到对应 GitHub Release。创建正式标签前，应先确认工作区已经脱敏、许可证选择明确，并在干净 Windows 环境验证安装包。
+工作流会运行 Go、Node 和 Review Store 测试，构建 `CodexTrace.zip`，生成 `CodexTrace.zip.sha256` 和 CycloneDX SBOM，并为 ZIP 生成 GitHub 构建来源证明。三个文件会发布到对应 GitHub Release。创建正式标签前，应先确认工作区已经脱敏，并在干净 Windows 环境验证安装包。
 
 ## 受管理 Windows 环境
 

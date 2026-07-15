@@ -285,6 +285,9 @@ if (-not $sameRoot) {
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "scripts") -Destination (Join-Path $InstallRoot "scripts")
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "docs") -Destination (Join-Path $InstallRoot "docs")
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "README.md") -Destination (Join-Path $InstallRoot "README.md")
+  if (Test-Path -LiteralPath (Join-Path $SourceRoot "LICENSE") -PathType Leaf) {
+    Copy-CodexTraceItem -Source (Join-Path $SourceRoot "LICENSE") -Destination (Join-Path $InstallRoot "LICENSE")
+  }
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "install.ps1") -Destination (Join-Path $InstallRoot "install.ps1")
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "codex-trace.ps1") -Destination (Join-Path $InstallRoot "codex-trace.ps1")
   Copy-CodexTraceItem -Source (Join-Path $SourceRoot "start.ps1") -Destination (Join-Path $InstallRoot "start.ps1")

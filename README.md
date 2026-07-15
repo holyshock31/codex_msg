@@ -79,6 +79,7 @@ http://127.0.0.1:45123/
 ```text
 CodexTrace.zip
 CodexTrace.zip.sha256
+CodexTrace.cdx.json
 ```
 
 校验并解压后执行：
@@ -90,7 +91,7 @@ cd .\CodexTrace
 .\codex-trace.ps1 install
 ```
 
-发布包已经包含编译后的 wrapper，因此不需要 Go；当前仍需要 Node.js 20+。发布的 wrapper 未进行商业代码签名，受管理设备可能要求管理员审批或自行签名。
+发布包已经包含编译后的 wrapper，因此不需要 Go；当前仍需要 Node.js 20+。Release 同时提供 CycloneDX SBOM 和 GitHub 构建来源证明。发布的 wrapper 未进行商业 Authenticode 代码签名，受管理设备可能要求管理员审批或自行签名。
 
 ## 日常使用
 
@@ -210,3 +211,7 @@ docs/                  设计、使用和排障文档
 - 统一 Windows、macOS 和 Linux 的配置格式、诊断输出和升级流程。
 - 将平台相关的安装与进程管理从核心采集、聚合和展示逻辑中进一步拆分。
 - 在不削弱本地隐私边界的前提下，支持更完整的会话比较、性能分析和问题复现工作流。
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。

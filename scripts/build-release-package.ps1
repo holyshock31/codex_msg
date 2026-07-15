@@ -34,6 +34,7 @@ if (Test-Path -Path $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 
 Copy-Item -Path (Join-Path $Root "install.ps1") -Destination (Join-Path $PackageRoot "install.ps1") -Force
+Copy-Item -Path (Join-Path $Root "LICENSE") -Destination (Join-Path $PackageRoot "LICENSE") -Force
 Copy-Item -Path (Join-Path $Root "codex-trace.ps1") -Destination (Join-Path $PackageRoot "codex-trace.ps1") -Force
 Copy-Item -Path (Join-Path $Root "start.ps1") -Destination (Join-Path $PackageRoot "start.ps1") -Force
 Copy-Item -Path (Join-Path $Root "stop.ps1") -Destination (Join-Path $PackageRoot "stop.ps1") -Force
