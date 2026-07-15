@@ -44,7 +44,7 @@ real_codex = "C:\\Users\\<user>\\AppData\\Local\\OpenAI\\Codex\\bin\\<build>\\co
 
 ## 开发启用
 
-受管理环境环境不要让 `CODEX_CLI_PATH` 指向 D 盘源码目录。先把构建出的 exe 复制到：
+不要让 `CODEX_CLI_PATH` 长期指向源码或临时构建目录。先把构建出的 exe 复制到稳定安装目录：
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
@@ -76,6 +76,8 @@ CODEX_TRACE_WRAPPER_CONFIG
 
 删除后，Desktop 会回到原生 bundled CLI 路径。没有修改安装包，所以不需要还原文件。
 
+wrapper 按 fail-open 运行：配置解析、trace 目录、viewer daemon 或本地持久化不可用时，禁用 trace 并继续透传到真实 Codex。只有真实 Codex 无法定位或启动时才返回致命错误。
+
 查看当前环境变量状态：
 
 ```powershell
@@ -97,7 +99,7 @@ C:\Users\<user>\.codex-trace\wrapper.log
 tcp://127.0.0.1:45124
 ```
 
-如果 `fallback_ndjson = true`，还会写入：
+如果 `fallback_ndjson = true`，daemon 连接或写入失败时会回退写入：
 
 ```text
 C:\Users\<user>\.codex-trace\events.ndjson

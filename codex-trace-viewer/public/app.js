@@ -20,6 +20,9 @@ const state = {
   conversationRefreshInFlight: false,
   conversationRefreshDirty: false,
   conversationViewSignature: "",
+  conversationFollowLatest: true,
+  conversationUnreadUpdates: 0,
+  conversationScrollApplying: false,
   renderScheduled: false,
   turnSortDescending: true,
 };
@@ -30,10 +33,16 @@ const maxTimelineSummaryChars = 600;
 const longItemGapMs = 30_000;
 const conversationRefreshVisibleMs = 1000;
 const conversationRefreshHiddenMs = 5000;
+const conversationFollowEdgePx = 80;
 const temporarySessionId = "__codex_trace_temporary_sessions__";
 const debugPerf = new URLSearchParams(window.location.search).get("debugPerf") === "1";
 const jumpFlashTimers = new WeakMap();
 const threadDetailRequests = new Map();
+const conversationNodeSignatures = new WeakMap();
+const conversationNodeContexts = new WeakMap();
+let conversationResizeObserver = null;
+let conversationObservedAnchor = null;
+let conversationScrollApplyToken = 0;
 const conversationPerf = {
   modelRequests: 0,
   modelActive: 0,
@@ -96,6 +105,7 @@ const els = {
   conversationMeta: document.querySelector("#conversationMeta"),
   conversationMessages: document.querySelector("#conversationMessages"),
   segmentRail: document.querySelector("#segmentRail"),
+  followLatestBtn: document.querySelector("#followLatestBtn"),
   chatShell: document.querySelector(".chatShell"),
   detailSplitter: document.querySelector("#detailSplitter"),
   segmentDetail: document.querySelector("#segmentDetail"),
@@ -392,6 +402,7 @@ function renderTabs() {
   els.tokensTabBtn.classList.toggle("active", tokens);
   els.timelineTabBtn.classList.toggle("active", timeline);
   els.liveLine.textContent = state.paused ? "paused" : "live";
+  updateFollowLatestButton();
 }
 
 function renderStorage() {
@@ -499,6 +510,7 @@ function tokenTableRow(row, type) {
 
 function renderSessionsAndConversation(options = {}) {
   const preserveConversation = Boolean(options.preserveConversation);
+  const scrollPlan = preserveConversation ? captureConversationScrollPlan() : null;
   const model = filteredConversationModel() || buildConversationModel(state.events.filter(passesFilters), state.events);
   if (!state.selectedSessionId || !model.sessions.some((session) => session.id === state.selectedSessionId)) {
     state.selectedSessionId = model.sessions[0]?.id || "";
@@ -521,11 +533,12 @@ function renderSessionsAndConversation(options = {}) {
   if (preserveConversation && nextSignature && nextSignature === state.conversationViewSignature) {
     renderSegmentsActiveState();
     renderSegmentDetail(findSelectedSegment(selected));
+    updateConversationFollowState();
     if (debugPerf) console.debug("[trace-viewer] preserve conversation render", { sessionId: selected?.id || "", signatureLength: nextSignature.length });
     return;
   }
   state.conversationViewSignature = nextSignature;
-  renderConversation(selected);
+  renderConversation(selected, { scrollPlan, autoUpdate: Boolean(options.autoUpdate) });
 }
 
 function conversationViewSignature(session) {
@@ -825,7 +838,7 @@ function closeTurnOverlay() {
   render();
 }
 
-function renderConversation(session) {
+function renderConversation(session, options = {}) {
   const renderStart = debugPerf ? performance.now() : 0;
   let renderedBlocks = 0;
   if (!session) {
@@ -867,7 +880,6 @@ function renderConversation(session) {
     return;
   }
 
-  els.conversationMessages.innerHTML = "";
   const fragment = document.createDocumentFragment();
   const visibleThreads = activeThread ? [activeThread] : [];
   let defaultRailTurn = null;
@@ -882,7 +894,7 @@ function renderConversation(session) {
         for (const { block, number } of blocks) {
           const timing = timingByBlock.get(block) || {};
           fragment.appendChild(segmentCard(block, threadModel, turn, number, timing));
-          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs));
+          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs, `wait:${threadModel.id}:${turn.id}:${block.key}:after`));
           renderedBlocks += 1;
         }
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
@@ -890,7 +902,7 @@ function renderConversation(session) {
         fragment.appendChild(turnLifecycleDivider(threadModel, turn, number, "start"));
         for (const { block, number } of blocks) {
           const timing = timingByBlock.get(block) || {};
-          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs));
+          if (timing.gapMs >= longItemGapMs) fragment.appendChild(itemWaitDivider(timing.gapMs, `wait:${threadModel.id}:${turn.id}:${block.key}:before`));
           fragment.appendChild(segmentCard(block, threadModel, turn, number, timing));
           renderedBlocks += 1;
         }
@@ -900,11 +912,17 @@ function renderConversation(session) {
   }
   if (!fragment.childNodes.length) {
     els.conversationMessages.innerHTML = `<div class="emptyState">No blocks for the selected agent.</div>`;
+    disconnectConversationResizeObserver();
   } else {
-    els.conversationMessages.appendChild(fragment);
+    reconcileConversationMessages(fragment);
   }
   renderSegmentRail(activeThread, currentRailTurn(activeThread, defaultRailTurn));
   renderSegmentDetail(findSelectedSegment(session));
+  if (options.scrollPlan) {
+    applyConversationScrollPlan(options.scrollPlan, { autoUpdate: Boolean(options.autoUpdate) });
+  } else {
+    updateConversationFollowState();
+  }
   if (debugPerf) {
     console.debug("[trace-viewer] renderConversation", {
       ms: Math.round((performance.now() - renderStart) * 10) / 10,
@@ -926,7 +944,7 @@ function threadDivider(threadModel) {
     <span>${escapeHtml(threadTitle(threadModel))}</span>
     <span>${escapeHtml(shortId(threadModel.id))}${escapeHtml(parent)}${escapeHtml(fork)}</span>
   `;
-  return el;
+  return registerConversationNode(el, `thread:${threadModel.id}`);
 }
 
 function turnLifecycleDivider(threadModel, turn, number, phase) {
@@ -948,14 +966,17 @@ function turnLifecycleDivider(threadModel, turn, number, phase) {
   el.innerHTML = `
     <span><strong>#${escapeHtml(String(number))}</strong> Turn ${escapeHtml(phaseLabel)} ${escapeHtml(shortId(turn.id))} / ${escapeHtml(time)}${endSummary ? ` / ${escapeHtml(endSummary)}` : ""}</span>
   `;
+  conversationNodeContexts.set(el, { threadModel, turn, phase });
   const jump = () => {
-    state.selectedThreadId = threadModel.id;
-    state.selectedTurnId = turn.id;
+    const context = conversationNodeContexts.get(el);
+    if (!context) return;
+    state.selectedThreadId = context.threadModel.id;
+    state.selectedTurnId = context.turn.id;
     state.selectedSegmentKey = "";
-    renderSegmentRail(threadModel, { thread: threadModel, turn });
+    renderSegmentRail(context.threadModel, { thread: context.threadModel, turn: context.turn });
     renderSegmentsActiveState();
     renderSegmentDetail(null);
-    scrollToTurnLifecycle(threadModel.id, turn.id, phase === "start" ? "end" : "start", "center");
+    scrollToTurnLifecycle(context.threadModel.id, context.turn.id, context.phase === "start" ? "end" : "start", "center");
   };
   el.addEventListener("click", jump);
   el.addEventListener("keydown", (event) => {
@@ -963,7 +984,76 @@ function turnLifecycleDivider(threadModel, turn, number, phase) {
     event.preventDefault();
     jump();
   });
-  return el;
+  return registerConversationNode(el, `turn:${threadModel.id}:${turn.id}:${phase}`, conversationNodeContexts.get(el));
+}
+
+function registerConversationNode(element, key, context = null) {
+  element.dataset.conversationKey = key;
+  if (context) conversationNodeContexts.set(element, context);
+  conversationNodeSignatures.set(element, conversationNodeRenderSignature(element));
+  return element;
+}
+
+function conversationNodeRenderSignature(element) {
+  const mutableClasses = new Set(["active", "jumpFlash", "selected"]);
+  const classes = Array.from(element.classList).filter((name) => !mutableClasses.has(name)).join(" ");
+  const attributes = Array.from(element.attributes)
+    .filter((attribute) => attribute.name !== "class")
+    .map((attribute) => `${attribute.name}=${attribute.value}`)
+    .sort()
+    .join("|");
+  return `${element.tagName}|${classes}|${attributes}|${element.innerHTML}`;
+}
+
+function syncConversationNodeState(existing, next) {
+  for (const className of ["active", "selected"]) {
+    existing.classList.toggle(className, next.classList.contains(className));
+  }
+}
+
+function reconcileConversationMessages(fragment) {
+  const container = els.conversationMessages;
+  const existingByKey = new Map();
+  for (const child of Array.from(container.children)) {
+    const key = child.dataset.conversationKey;
+    if (key) existingByKey.set(key, child);
+  }
+
+  const nextChildren = Array.from(fragment.children);
+  const retained = new Set();
+  let reference = container.firstElementChild;
+  for (const next of nextChildren) {
+    const key = next.dataset.conversationKey;
+    const existing = key ? existingByKey.get(key) : null;
+    const canReuse = existing && conversationNodeSignatures.get(existing) === conversationNodeSignatures.get(next);
+    let node = next;
+    let positionHandled = false;
+    if (canReuse) {
+      const context = conversationNodeContexts.get(next);
+      if (context) conversationNodeContexts.set(existing, context);
+      syncConversationNodeState(existing, next);
+      node = existing;
+    } else if (existing) {
+      const nextReference = existing.nextElementSibling;
+      const wasReference = existing === reference;
+      existing.replaceWith(next);
+      if (wasReference) {
+        reference = nextReference;
+        positionHandled = true;
+      }
+    }
+    retained.add(node);
+    if (positionHandled) continue;
+    if (node === reference) {
+      reference = reference.nextElementSibling;
+    } else {
+      container.insertBefore(node, reference);
+    }
+  }
+  for (const child of Array.from(container.children)) {
+    if (!retained.has(child)) child.remove();
+  }
+  syncConversationResizeObserver();
 }
 
 function turnLifecycleTimeLabel(turn, phase) {
@@ -1048,6 +1138,209 @@ function turnLifecycleElement(threadId, turnId, phase = null) {
 
 function scrollToTurnLifecycle(threadId, turnId, phase = null, block = "start") {
   return jumpToConversationElement(turnLifecycleElement(threadId, turnId, phase), block);
+}
+
+function conversationLatestEdgeDistance(container = els.conversationMessages) {
+  if (!(container instanceof HTMLElement)) return 0;
+  if (state.turnSortDescending) return Math.max(0, container.scrollTop);
+  const max = Math.max(0, container.scrollHeight - container.clientHeight);
+  return Math.max(0, max - container.scrollTop);
+}
+
+function isConversationAtLatest(container = els.conversationMessages) {
+  return conversationLatestEdgeDistance(container) <= conversationFollowEdgePx;
+}
+
+function scrollToLatestConversationEdge(container = els.conversationMessages) {
+  if (!(container instanceof HTMLElement)) return;
+  const max = Math.max(0, container.scrollHeight - container.clientHeight);
+  setConversationScrollTop(container, state.turnSortDescending ? 0 : max);
+}
+
+function captureConversationScrollPlan() {
+  const container = els.conversationMessages;
+  if (!(container instanceof HTMLElement)) return null;
+  const followLatest = isConversationAtLatest(container);
+  return {
+    followLatest,
+    scrollTop: container.scrollTop,
+    anchor: followLatest ? null : captureConversationScrollAnchor(container),
+  };
+}
+
+function captureConversationScrollAnchor(container) {
+  const containerRect = container.getBoundingClientRect();
+  const candidates = Array.from(container.querySelectorAll(".segmentCard, .turnDivider, .threadDivider"));
+  const visible = candidates.filter((element) => isConversationAnchorVisible(element, containerRect));
+  const selected = visible.find((element) => element.classList.contains("segmentCard") && element.dataset.segmentKey === state.selectedSegmentKey);
+  const target = selected || closestConversationAnchorToCenter(visible, containerRect) || candidates[0];
+  if (!(target instanceof HTMLElement)) return null;
+  const selector = conversationAnchorSelector(target);
+  if (!selector) return null;
+  return {
+    selector,
+    offsetTop: target.getBoundingClientRect().top - containerRect.top,
+  };
+}
+
+function isConversationAnchorVisible(element, containerRect) {
+  const rect = element.getBoundingClientRect();
+  return rect.bottom > containerRect.top + 8 && rect.top < containerRect.bottom - 8;
+}
+
+function closestConversationAnchorToCenter(elements, containerRect) {
+  const center = containerRect.top + containerRect.height / 2;
+  let best = null;
+  let bestDistance = Infinity;
+  for (const element of elements) {
+    const rect = element.getBoundingClientRect();
+    const distance = Math.abs(rect.top + rect.height / 2 - center);
+    if (distance < bestDistance) {
+      best = element;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function conversationAnchorSelector(element) {
+  if (element.classList.contains("segmentCard")) {
+    const { threadId, turnId, segmentKey } = element.dataset;
+    if (threadId && turnId && segmentKey) return segmentDomSelector(threadId, turnId, segmentKey);
+  }
+  if (element.classList.contains("turnDivider")) {
+    const { threadId, turnId, phase } = element.dataset;
+    if (threadId && turnId) return `#${turnLifecycleId(threadId, turnId, phase || null)}`;
+  }
+  if (element.classList.contains("threadDivider") && element.dataset.threadId) {
+    return `#thread-${cssSafeId(element.dataset.threadId)}`;
+  }
+  return "";
+}
+
+function restoreConversationScrollAnchor(plan, container = els.conversationMessages) {
+  if (!(container instanceof HTMLElement) || !plan?.anchor?.selector) return false;
+  const target = container.querySelector(plan.anchor.selector);
+  if (!(target instanceof HTMLElement) || !container.contains(target)) return false;
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const nextScrollTop = container.scrollTop + targetRect.top - containerRect.top - plan.anchor.offsetTop;
+  setConversationScrollTop(container, nextScrollTop);
+  return true;
+}
+
+function applyConversationScrollPlan(plan, options = {}) {
+  const container = els.conversationMessages;
+  if (!(container instanceof HTMLElement) || !plan) {
+    updateConversationFollowState();
+    return;
+  }
+  const applyToken = beginConversationScrollApplication();
+  state.conversationFollowLatest = plan.followLatest;
+  if (options.autoUpdate && !plan.followLatest) {
+    state.conversationUnreadUpdates = Math.min(99, state.conversationUnreadUpdates + 1);
+  }
+  if (plan.followLatest) {
+    scrollToLatestConversationEdge(container);
+    state.conversationUnreadUpdates = 0;
+  } else if (!restoreConversationScrollAnchor(plan, container)) {
+    setConversationScrollTop(container, plan.scrollTop || 0);
+  }
+  rememberConversationAnchorPosition(container);
+  finishConversationScrollApplication(applyToken);
+  updateFollowLatestButton();
+}
+
+function beginConversationScrollApplication() {
+  state.conversationScrollApplying = true;
+  conversationScrollApplyToken += 1;
+  return conversationScrollApplyToken;
+}
+
+function finishConversationScrollApplication(token) {
+  window.requestAnimationFrame(() => {
+    if (token !== conversationScrollApplyToken) return;
+    state.conversationScrollApplying = false;
+    state.conversationFollowLatest = isConversationAtLatest();
+    if (state.conversationFollowLatest) {
+      state.conversationUnreadUpdates = 0;
+      conversationObservedAnchor = null;
+    } else if (!conversationObservedAnchor) {
+      rememberConversationAnchorPosition();
+    }
+    updateFollowLatestButton();
+  });
+}
+
+function rememberConversationAnchorPosition(container = els.conversationMessages) {
+  if (!(container instanceof HTMLElement) || isConversationAtLatest(container)) {
+    conversationObservedAnchor = null;
+    return;
+  }
+  const anchor = captureConversationScrollAnchor(container);
+  const element = anchor?.selector ? container.querySelector(anchor.selector) : null;
+  conversationObservedAnchor = element instanceof HTMLElement ? { element, offsetTop: anchor.offsetTop } : null;
+}
+
+function ensureConversationResizeObserver() {
+  if (conversationResizeObserver || typeof ResizeObserver === "undefined") return conversationResizeObserver;
+  conversationResizeObserver = new ResizeObserver(() => {
+    const container = els.conversationMessages;
+    if (!(container instanceof HTMLElement) || state.activeTab !== "conversation") return;
+    if (state.conversationFollowLatest) {
+      const token = beginConversationScrollApplication();
+      scrollToLatestConversationEdge(container);
+      conversationObservedAnchor = null;
+      finishConversationScrollApplication(token);
+      return;
+    }
+    const anchor = conversationObservedAnchor;
+    if (!(anchor?.element instanceof HTMLElement) || !anchor.element.isConnected || !container.contains(anchor.element)) {
+      rememberConversationAnchorPosition(container);
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const nextOffsetTop = anchor.element.getBoundingClientRect().top - containerRect.top;
+    const delta = nextOffsetTop - anchor.offsetTop;
+    if (Math.abs(delta) <= 0.5) return;
+    const token = beginConversationScrollApplication();
+    setConversationScrollTop(container, container.scrollTop + delta);
+    anchor.offsetTop = anchor.element.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    finishConversationScrollApplication(token);
+  });
+  return conversationResizeObserver;
+}
+
+function syncConversationResizeObserver() {
+  const observer = ensureConversationResizeObserver();
+  if (!observer) return;
+  observer.disconnect();
+  for (const element of els.conversationMessages.querySelectorAll(".segmentCard, .turnDivider, .threadDivider, .itemWaitDivider")) {
+    observer.observe(element);
+  }
+}
+
+function disconnectConversationResizeObserver() {
+  conversationResizeObserver?.disconnect();
+  conversationObservedAnchor = null;
+}
+
+function updateConversationFollowState() {
+  if (state.conversationScrollApplying) return;
+  state.conversationFollowLatest = isConversationAtLatest();
+  if (state.conversationFollowLatest) state.conversationUnreadUpdates = 0;
+  rememberConversationAnchorPosition();
+  updateFollowLatestButton();
+}
+
+function updateFollowLatestButton() {
+  if (!els.followLatestBtn) return;
+  const show = state.activeTab === "conversation" && !state.conversationFollowLatest && state.conversationUnreadUpdates > 0;
+  els.followLatestBtn.hidden = !show;
+  if (show) {
+    const count = state.conversationUnreadUpdates;
+    els.followLatestBtn.textContent = `${count === 1 ? "1 update" : `${count} updates`} - Follow latest`;
+  }
 }
 
 function turnLabel(turn, number) {
@@ -1211,14 +1504,15 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
   const gapText = compactGapLabel(timing.gapMs);
   if (isContextCompactionBlock(block)) {
     article.innerHTML = contextCompactionMarkup(block, number, timing);
-    article.addEventListener("click", () => selectSegment(block, threadModel, turn));
+    conversationNodeContexts.set(article, { block, threadModel, turn });
+    article.addEventListener("click", () => selectConversationSegmentElement(article));
     article.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectSegment(block, threadModel, turn);
+        selectConversationSegmentElement(article);
       }
     });
-    return article;
+    return registerConversationNode(article, `segment:${threadModel.id}:${turn.id}:${block.key}`, conversationNodeContexts.get(article));
   }
   const preview = segmentPreview(block);
   article.innerHTML = `
@@ -1232,14 +1526,21 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
     </div>
     <div class="segmentPreview">${escapeHtml(preview)}</div>
   `;
-  article.addEventListener("click", () => selectSegment(block, threadModel, turn));
+  conversationNodeContexts.set(article, { block, threadModel, turn });
+  article.addEventListener("click", () => selectConversationSegmentElement(article));
   article.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      selectSegment(block, threadModel, turn);
+      selectConversationSegmentElement(article);
     }
   });
-  return article;
+  return registerConversationNode(article, `segment:${threadModel.id}:${turn.id}:${block.key}`, conversationNodeContexts.get(article));
+}
+
+function selectConversationSegmentElement(element) {
+  const context = conversationNodeContexts.get(element);
+  if (!context) return;
+  selectSegment(context.block, context.threadModel, context.turn);
 }
 
 function isContextCompactionBlock(block) {
@@ -1264,12 +1565,12 @@ function contextCompactionMarkup(block, number = "", timing = {}) {
   `;
 }
 
-function itemWaitDivider(gapMs) {
+function itemWaitDivider(gapMs, key) {
   const el = document.createElement("div");
   el.className = "itemWaitDivider";
   el.setAttribute("aria-label", `Waited ${durationLabel(gapMs)}`);
   el.innerHTML = `<span>waited ${escapeHtml(durationLabel(gapMs))}</span>`;
-  return el;
+  return registerConversationNode(el, key);
 }
 
 function blockDurationLabel(block) {
@@ -2825,11 +3126,12 @@ function requestConversationThread(threadId) {
 async function ensureConversationThreadDetail(threadId) {
   const current = conversationThreadsById(state.conversationModel).get(threadId);
   if (!current || current.detailLoaded !== false) return Boolean(current);
+  const preserveConversation = state.activeTab === "conversation" && Boolean(els.conversationMessages.querySelector(".segmentCard, .turnDivider, .threadDivider"));
   const response = await requestConversationThread(threadId);
   if (!replaceConversationThread(response)) return false;
   state.conversationViewSignature = "";
-  renderSessionsAndConversation();
-  if (state.selectedThreadId === threadId && state.selectedTurnId) {
+  renderSessionsAndConversation({ preserveConversation, autoUpdate: preserveConversation });
+  if (!preserveConversation && state.selectedThreadId === threadId && state.selectedTurnId) {
     requestAnimationFrame(() => scrollToTurnLifecycle(threadId, state.selectedTurnId));
   }
   return true;
@@ -2905,7 +3207,7 @@ async function runConversationRefresh() {
     if (changed && !state.paused) {
       if (state.activeTab === "conversation") {
         renderStorage();
-        renderSessionsAndConversation({ preserveConversation: true });
+        renderSessionsAndConversation({ preserveConversation: true, autoUpdate: true });
       } else {
         scheduleRender();
       }
@@ -2954,6 +3256,21 @@ for (const el of [els.dirFilter, els.methodFilter, els.threadFilter, els.textFil
     scheduleConversationRefresh({ immediate: true });
   });
 }
+
+els.conversationMessages.addEventListener("scroll", () => {
+  if (state.conversationScrollApplying) return;
+  updateConversationFollowState();
+});
+
+els.followLatestBtn?.addEventListener("click", () => {
+  const token = beginConversationScrollApplication();
+  scrollToLatestConversationEdge();
+  state.conversationFollowLatest = true;
+  state.conversationUnreadUpdates = 0;
+  conversationObservedAnchor = null;
+  finishConversationScrollApplication(token);
+  updateFollowLatestButton();
+});
 
 els.conversationTabBtn.addEventListener("click", () => {
   state.activeTab = "conversation";

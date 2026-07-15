@@ -22,6 +22,9 @@ jobs:
         run: |
           node --check .\codex-trace-viewer\server.js
           node --check .\codex-trace-viewer\public\app.js
+      - name: Test review storage
+        shell: powershell
+        run: .\codex-trace.ps1 test-storage
       - name: Install from a clean source checkout
         shell: powershell
         run: .\codex-trace.ps1 install -NoEnable -NoStartViewer -InstallRoot (Join-Path $env:RUNNER_TEMP "CodexTrace")

@@ -76,6 +76,8 @@ try {
   }
 
   $events = @()
+  $finalText = "persisted final answer"
+  $expectedPersistedEvents = 4
   $events += New-TraceEvent -Seq 1 -Method "thread/started" -Params @{
     thread = @{
       id = "thread-main"
@@ -100,7 +102,18 @@ try {
       delta = "chunk-$i "
     }
   }
-  $events += New-TraceEvent -Seq 101 -Method "turn/completed" -Params @{
+  $events += New-TraceEvent -Seq 101 -Method "item/completed" -Params @{
+    threadId = "thread-main"
+    sessionId = "session-root"
+    turnId = "turn-1"
+    item = @{
+      id = "msg-1"
+      type = "agentMessage"
+      phase = "final_answer"
+      text = $finalText
+    }
+  }
+  $events += New-TraceEvent -Seq 102 -Method "turn/completed" -Params @{
     threadId = "thread-main"
     sessionId = "session-root"
     turnId = "turn-1"
@@ -120,13 +133,17 @@ try {
   if ($storage.pendingEvents -ne 0) {
     throw "expected pendingEvents=0 after flush, got $($storage.pendingEvents)"
   }
-  if ($storage.writtenEvents -lt $events.Count) {
-    throw "expected at least $($events.Count) written events, got $($storage.writtenEvents)"
+  if ($storage.writtenEvents -ne $expectedPersistedEvents) {
+    throw "expected $expectedPersistedEvents persisted events after filtering deltas, got $($storage.writtenEvents)"
   }
 
   $conversations = Invoke-Json -Uri "$Base/api/conversations"
   if ($conversations.sessions.Count -lt 1) {
     throw "expected restored conversation model"
+  }
+  $conversationJson = $conversations | ConvertTo-Json -Depth 30 -Compress
+  if ($conversationJson -notmatch [regex]::Escape($finalText)) {
+    throw "expected live conversation model to contain final item text"
   }
 
   Stop-Process -Id $Process.Id -ErrorAction SilentlyContinue
@@ -143,8 +160,13 @@ try {
   Start-Sleep -Milliseconds 900
 
   $restored = Invoke-Json -Uri "$Base/api/status"
-  if ($restored.totalRestored -lt $events.Count) {
-    throw "expected startup restore to load events, got totalRestored=$($restored.totalRestored)"
+  if ($restored.totalRestored -ne $expectedPersistedEvents) {
+    throw "expected startup restore to load $expectedPersistedEvents events, got totalRestored=$($restored.totalRestored)"
+  }
+  $restoredConversations = Invoke-Json -Uri "$Base/api/conversations"
+  $restoredJson = $restoredConversations | ConvertTo-Json -Depth 30 -Compress
+  if ($restoredJson -notmatch [regex]::Escape($finalText)) {
+    throw "expected restored conversation model to contain final item text"
   }
 
   $preview = Invoke-Json -Method "POST" -Uri "$Base/api/storage/cleanup" -Body @{

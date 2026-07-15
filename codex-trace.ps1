@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $validCommands = @("install", "setup", "start", "stop", "restart", "status", "enable", "disable", "test-storage", "help")
 $InstallRoot = ""
+$ConfigPath = ""
 $EnableDesktopTrace = $false
 $Broadcast = $false
 $NoEnable = $false
@@ -35,6 +36,18 @@ for ($index = 0; $index -lt $RemainingArgs.Count; $index += 1) {
         throw "-InstallRoot requires a path."
       }
       $InstallRoot = $RemainingArgs[$index]
+      break
+    }
+    "^-ConfigPath[:=](.+)$" {
+      $ConfigPath = $Matches[1]
+      break
+    }
+    "^-ConfigPath$" {
+      $index += 1
+      if ($index -ge $RemainingArgs.Count) {
+        throw "-ConfigPath requires a path."
+      }
+      $ConfigPath = $RemainingArgs[$index]
       break
     }
     "^-EnableDesktopTrace$" {
@@ -105,6 +118,9 @@ function Invoke-CodexTraceInstall {
   $installParams = @{}
   if (-not [string]::IsNullOrWhiteSpace($script:RequestedInstallRoot)) {
     $installParams["InstallRoot"] = $script:RequestedInstallRoot
+  }
+  if (-not [string]::IsNullOrWhiteSpace($script:RequestedConfigPath)) {
+    $installParams["ConfigPath"] = $script:RequestedConfigPath
   }
   if ($NoEnable) {
     $installParams["NoEnable"] = $true
@@ -227,8 +243,8 @@ function Show-CodexTraceStatus {
 
 function Show-CodexTraceHelp {
   Write-Host "Usage:"
-  Write-Host "  .\codex-trace.ps1 install [-InstallRoot <path>] [-NoEnable] [-NoStartViewer]"
-  Write-Host "  .\codex-trace.ps1 setup [-InstallRoot <path>] [-NoEnable] [-NoStartViewer]"
+  Write-Host "  .\codex-trace.ps1 install [-InstallRoot <path>] [-ConfigPath <path>] [-NoEnable] [-NoStartViewer]"
+  Write-Host "  .\codex-trace.ps1 setup [-InstallRoot <path>] [-ConfigPath <path>] [-NoEnable] [-NoStartViewer]"
   Write-Host "  .\codex-trace.ps1 start [-EnableDesktopTrace] [-Broadcast]"
   Write-Host "  .\codex-trace.ps1 status"
   Write-Host "  .\codex-trace.ps1 stop"
@@ -242,6 +258,7 @@ function Show-CodexTraceHelp {
 }
 
 $script:RequestedInstallRoot = $InstallRoot
+$script:RequestedConfigPath = $ConfigPath
 $script:InstallRoot = Resolve-CodexTraceInstallRoot -Value $InstallRoot
 $viewerPort = Get-CodexTracePort -Name "CODEX_TRACE_VIEWER_PORT" -Default 45123
 

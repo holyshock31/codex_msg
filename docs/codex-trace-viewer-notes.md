@@ -41,15 +41,15 @@ Codex Desktop 会在用户输入前注入环境上下文，例如：
 Timeline / Full info = 给人调试，保留协议事件
 ```
 
-## 受管理环境安装路径与终端安全软件
+## 受管理 Windows 环境
 
-部分企业电脑安装的终端安全软件可能阻止 Codex Desktop 从用户可写目录启动外部未签名 exe，Codex Desktop 日志里通常表现为 `spawn EPERM`。
+受管理的 Windows 设备可能按照组织策略阻止 Codex Desktop 启动外部未签名 exe，Codex Desktop 日志里通常表现为 `spawn EPERM`。
 
-已验证：
+项目约定：
 
-- `C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe` 可作为受管理环境默认安装路径。
-- `<clone-directory>\codex-trace-wrapper\dist\codex-trace-wrapper.exe` 不适合作为 `CODEX_CLI_PATH`。
-- `C:\Users\<user>\AppData\Local\CodexTrace\bin\codex-trace-wrapper.exe` 不适合作为 `CODEX_CLI_PATH`。
+- `C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe` 是默认安装路径。
+- 不建议让 `CODEX_CLI_PATH` 长期指向源码、构建、临时或下载目录中的文件。
+- 默认路径不构成安全策略放行保证；组织环境仍可能要求签名或管理员审批。
 
 使用约定：
 
@@ -66,4 +66,4 @@ C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 C:\Users\<user>\Documents\CodexTrace\bin\config.toml
 ```
 
-- 后续如果受管理环境分发或安装，应默认复制 wrapper 和 `config.toml` 到 `C:\Users\<user>\Documents\CodexTrace\bin\`，不要直接从 D 盘开发目录、`AppData\Local`、`Temp`、`Downloads` 等目录启动。
+- 分发或安装时应把 wrapper 和 `config.toml` 复制到 `C:\Users\<user>\Documents\CodexTrace\bin\`，并遵循目标设备的安全策略。

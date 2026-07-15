@@ -16,11 +16,28 @@ case ":$CLEAN_PATH:" in
   *) CLEAN_PATH="$HOME/.local/bin:$CLEAN_PATH" ;;
 esac
 
-REAL_CODEX="$(PATH="$CLEAN_PATH" command -v codex || true)"
+REAL_CODEX="${CODEX_TRACE_REAL_CODEX:-}"
+if [ -z "$REAL_CODEX" ]; then
+  REAL_CODEX="$(PATH="$CLEAN_PATH" command -v codex || true)"
+fi
+if [ -z "$REAL_CODEX" ]; then
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/codex; do
+    if [ -x "$candidate" ]; then
+      REAL_CODEX="$candidate"
+      break
+    fi
+  done
+fi
 if [ -z "$REAL_CODEX" ]; then
   echo "codex trace shim: real codex not found after removing $TRACE_BIN from PATH" >&2
   exit 127
 fi
+
+REAL_CODEX_DIR="$(dirname "$REAL_CODEX")"
+case ":$CLEAN_PATH:" in
+  *":$REAL_CODEX_DIR:"*) ;;
+  *) CLEAN_PATH="$REAL_CODEX_DIR:$CLEAN_PATH" ;;
+esac
 
 if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "proxy" ]; then
   export PATH="$CLEAN_PATH"

@@ -1,5 +1,6 @@
 param(
   [string]$InstallRoot = "",
+  [string]$ConfigPath = "",
   [switch]$NoEnable,
   [switch]$NoStartViewer
 )
@@ -244,12 +245,18 @@ if (Test-Path -Path $packageWrapper -PathType Leaf) {
   throw "Wrapper executable not found. Expected bin\codex-trace-wrapper.exe in a release package, or codex-trace-wrapper\dist\codex-trace-wrapper.exe in a source checkout. Build the wrapper first."
 }
 $configSource = $null
-if (Test-Path -Path $packageConfig -PathType Leaf) {
+if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+  $resolvedConfigPath = (Resolve-Path -LiteralPath $ConfigPath -ErrorAction Stop).Path
+  if (-not (Test-Path -LiteralPath $resolvedConfigPath -PathType Leaf)) {
+    throw "Explicit wrapper config is not a file: $resolvedConfigPath"
+  }
+  $configSource = $resolvedConfigPath
+} elseif (Test-Path -Path $packageConfig -PathType Leaf) {
   $configSource = $packageConfig
-} elseif (Test-Path -Path $sourceConfig -PathType Leaf) {
-  $configSource = $sourceConfig
 } elseif (Test-Path -Path $releaseConfig -PathType Leaf) {
   $configSource = $releaseConfig
+} elseif (Test-Path -Path $sourceConfig -PathType Leaf) {
+  $configSource = $sourceConfig
 } else {
   throw "Wrapper config not found. Expected bin\config.toml in a release package, or codex-trace-wrapper\config.toml in a source checkout."
 }

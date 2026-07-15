@@ -1,6 +1,6 @@
 # 本地开发与构建指南
 
-本文档面向项目开发者，用于在源码目录中修改、构建、调试和生成 release zip。给同事安装或使用时不要参考本文档，使用 [distribution-user-guide.md](./distribution-user-guide.md)。
+本文档面向项目开发者，用于在源码目录中修改、构建、调试和生成 release zip。安装或使用发布包时请参考 [distribution-user-guide.md](./distribution-user-guide.md)。
 
 ## 开发目录
 
@@ -58,7 +58,13 @@ http://127.0.0.1:45123/?v=chat-redesign
 
 如果 wrapper 尚未构建，`install` 会自动调用 Go 构建。
 
-如果需要捕获 `rawResponseItem/completed` 这类原始 Responses item 通知，可以在安装后的 `bin\config.toml` 或开发配置中打开：
+默认安装始终使用 [tools/release-config.toml](../tools/release-config.toml) 的被动采集配置。如果需要捕获 `rawResponseItem/completed` 这类原始 Responses item 通知，可以准备独立开发配置并显式安装：
+
+```powershell
+.\codex-trace.ps1 install -ConfigPath .\codex-trace-wrapper\config.toml
+```
+
+开发配置中打开：
 
 ```toml
 [rewrite]
@@ -98,7 +104,7 @@ node --check .\codex-trace-viewer\public\app.js
 
 ## 开发机启用 Trace
 
-受管理环境环境不要把 `CODEX_CLI_PATH` 直接指向 D 盘源码目录。开发构建完成后，推荐直接走总入口安装：
+不要把 `CODEX_CLI_PATH` 长期指向源码或临时构建目录。开发构建完成后，推荐直接走总入口安装：
 
 ```powershell
 .\codex-trace.ps1 install
@@ -168,7 +174,7 @@ CodexTrace.zip
     distribution-user-guide.md
 ```
 
-其中运行时使用的 `bin/config.toml` 来自 [tools/release-config.toml](../tools/release-config.toml)，不会包含本机用户名、真实 Codex build hash 或 D 盘路径。`codex-trace-wrapper/config.toml` 仍随包保留，主要用于排障和兼容旧路径。
+其中运行时使用的 `bin/config.toml` 来自 [tools/release-config.toml](../tools/release-config.toml)，不会包含本机用户名、真实 Codex build hash 或绝对开发路径。包内兼容路径下的 `codex-trace-wrapper/config.toml` 也使用同一份 release 配置。
 
 ## 本地验证 Release 包
 
@@ -207,24 +213,28 @@ CodexTrace.zip
 
 `start.ps1`、`stop.ps1`、`status.ps1`、`enable-desktop-trace.ps1`、`disable-desktop-trace.ps1` 也会保留，但只是兼容快捷方式。
 
-## 公司安全软件注意
+## GitHub Release
 
-组织安全策略可能阻止 Codex Desktop 从以下位置启动 wrapper：
+推送 `v*` 标签会触发 `.github/workflows/release.yml`：
 
-```text
-<clone-directory>\...
-C:\Users\<user>\AppData\Local\...
-Temp
-Downloads
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-表现通常是 Codex Desktop 日志里的 `spawn EPERM`。因此源码可以放 D 盘，但 `CODEX_CLI_PATH` 指向的 exe 应复制到：
+工作流会运行 Go、Node 和 Review Store 测试，构建 `CodexTrace.zip`，生成 `CodexTrace.zip.sha256`，并把两个文件发布到对应 GitHub Release。创建正式标签前，应先确认工作区已经脱敏、许可证选择明确，并在干净 Windows 环境验证安装包。
+
+## 受管理 Windows 环境
+
+组织策略可能阻止 Codex Desktop 启动外部未签名 wrapper，表现通常是日志里的 `spawn EPERM`。`CODEX_CLI_PATH` 指向的 exe 应复制到稳定安装目录：
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
 
 `CODEX_TRACE_WRAPPER_CONFIG` 应指向安装目录内与 wrapper exe 同目录的 `bin\config.toml`。
+
+该路径不绕过系统或组织安全策略。仍应按要求完成代码签名、管理员审批或安全软件放行。
 
 ## 前置依赖
 

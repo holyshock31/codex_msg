@@ -40,8 +40,8 @@ const STORAGE_PENDING_MAX_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PENDING
 const STORAGE_SEGMENT_MAX_BYTES = Number(process.env.CODEX_TRACE_STORAGE_SEGMENT_MAX_BYTES || String(32 * 1024 * 1024));
 const STORAGE_SEGMENT_ROLL_MS = Number(process.env.CODEX_TRACE_STORAGE_SEGMENT_ROLL_MS || String(60 * 60 * 1000));
 const STORAGE_PRELOAD_ENABLED = (process.env.CODEX_TRACE_STORAGE_PRELOAD || "true").toLowerCase() !== "false";
-const STORAGE_PRELOAD_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_BYTES || String(512 * 1024 * 1024));
-const STORAGE_PRELOAD_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_EVENTS || "100000");
+const STORAGE_PRELOAD_BYTES = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_BYTES || String(64 * 1024 * 1024));
+const STORAGE_PRELOAD_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_EVENTS || "20000");
 const STORAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_STORAGE_SCAN_CACHE_MS || "5000");
 const TOKEN_USAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_TOKEN_USAGE_SCAN_CACHE_MS || "30000");
 const TOKEN_USAGE_TOP_LIMIT = Number(process.env.CODEX_TRACE_TOKEN_USAGE_TOP_LIMIT || "50");
@@ -2175,6 +2175,9 @@ function currentStatus() {
     storage: {
       enabled: STORAGE_ENABLED,
       storageDir: STORAGE_DIR,
+      preloadEnabled: STORAGE_PRELOAD_ENABLED,
+      preloadBytes: STORAGE_PRELOAD_BYTES,
+      preloadEvents: STORAGE_PRELOAD_EVENTS,
       pendingEvents: storageState.pending.length,
       pendingBytes: storageState.pendingBytes,
       writtenEvents: storageState.writtenEvents,

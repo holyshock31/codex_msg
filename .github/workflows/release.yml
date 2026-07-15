@@ -1,0 +1,56 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+      - name: Test wrapper
+        working-directory: codex-trace-wrapper
+        run: go test ./...
+      - name: Check viewer syntax
+        run: |
+          node --check .\codex-trace-viewer\server.js
+          node --check .\codex-trace-viewer\public\app.js
+      - name: Test review storage
+        shell: powershell
+        run: .\codex-trace.ps1 test-storage
+      - name: Build release package
+        shell: powershell
+        run: .\scripts\build-release-package.ps1
+      - name: Create checksum
+        shell: powershell
+        run: |
+          $hash = (Get-FileHash .\dist\CodexTrace.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  CodexTrace.zip" | Set-Content .\dist\CodexTrace.zip.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexTrace-windows-${{ github.ref_name }}
+          path: |
+            dist/CodexTrace.zip
+            dist/CodexTrace.zip.sha256
+      - name: Publish GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            .\dist\CodexTrace.zip `
+            .\dist\CodexTrace.zip.sha256 `
+            --verify-tag `
+            --generate-notes `
+            --title $env:GITHUB_REF_NAME

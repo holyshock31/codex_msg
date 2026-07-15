@@ -110,37 +110,22 @@ func writeEarlyMarker() {
 }
 
 func run(bootstrap *bootstrapLog) (int, error) {
-	bootstrap.Log("load_config_start", map[string]string{configEnv: os.Getenv(configEnv)})
-	cfg, err := loadConfig()
+	cfg, traceEnabled, err := prepareRuntimeConfig(bootstrap)
 	if err != nil {
-		bootstrap.Log("load_config_error", map[string]string{"error": err.Error()})
 		return 1, err
 	}
-	bootstrap.Log("load_config_done", map[string]string{
-		"real_codex":       cfg.RealCodex,
-		"trace_dir":        cfg.TraceDir,
-		"daemon_url":       cfg.DaemonURL,
-		"fallback_ndjson":  strconv.FormatBool(cfg.FallbackNDJSON),
-		"queue_capacity":   strconv.Itoa(cfg.QueueCapacity),
-		"summary_override": cfg.ReasoningSummaryOverride,
-		"raw_events":       strconv.FormatBool(cfg.EnableExperimentalRawEvents),
-	})
-	bootstrap.Log("mkdir_trace_dir_start", map[string]string{"trace_dir": cfg.TraceDir})
-	if err := os.MkdirAll(cfg.TraceDir, 0o700); err != nil {
-		bootstrap.Log("mkdir_trace_dir_error", map[string]string{"trace_dir": cfg.TraceDir, "error": err.Error()})
-		return 1, fmt.Errorf("create trace dir %s: %w", cfg.TraceDir, err)
-	}
-	bootstrap.Log("mkdir_trace_dir_done", map[string]string{"trace_dir": cfg.TraceDir})
 
-	wrapperLogPath := filepath.Join(cfg.TraceDir, "wrapper.log")
-	bootstrap.Log("wrapper_log_open_start", map[string]string{"path": wrapperLogPath})
-	logFile, err := openAppend(wrapperLogPath)
-	if err == nil {
-		_, _ = fmt.Fprintf(logFile, "%d starting real_codex=%s trace_dir=%s daemon_url=%s fallback_ndjson=%t queue_capacity=%d summary_override=%s raw_events=%t\n", nowMs(), cfg.RealCodex, cfg.TraceDir, cfg.DaemonURL, cfg.FallbackNDJSON, cfg.QueueCapacity, cfg.ReasoningSummaryOverride, cfg.EnableExperimentalRawEvents)
-		_ = logFile.Close()
-		bootstrap.Log("wrapper_log_open_done", map[string]string{"path": wrapperLogPath})
-	} else {
-		bootstrap.Log("wrapper_log_open_error", map[string]string{"path": wrapperLogPath, "error": err.Error()})
+	if traceEnabled {
+		wrapperLogPath := filepath.Join(cfg.TraceDir, "wrapper.log")
+		bootstrap.Log("wrapper_log_open_start", map[string]string{"path": wrapperLogPath})
+		logFile, logErr := openAppend(wrapperLogPath)
+		if logErr == nil {
+			_, _ = fmt.Fprintf(logFile, "%d starting real_codex=%s trace_dir=%s daemon_url=%s fallback_ndjson=%t queue_capacity=%d summary_override=%s raw_events=%t\n", nowMs(), cfg.RealCodex, cfg.TraceDir, cfg.DaemonURL, cfg.FallbackNDJSON, cfg.QueueCapacity, cfg.ReasoningSummaryOverride, cfg.EnableExperimentalRawEvents)
+			_ = logFile.Close()
+			bootstrap.Log("wrapper_log_open_done", map[string]string{"path": wrapperLogPath})
+		} else {
+			bootstrap.Log("wrapper_log_open_error", map[string]string{"path": wrapperLogPath, "error": logErr.Error()})
+		}
 	}
 
 	bootstrap.Log("real_codex_command_prepare", map[string]string{
@@ -181,10 +166,13 @@ func run(bootstrap *bootstrapLog) (int, error) {
 		"child_pid":  strconv.Itoa(cmd.Process.Pid),
 	})
 
-	events := make(chan traceEvent, cfg.QueueCapacity)
+	var events chan traceEvent
 	var writerWG sync.WaitGroup
-	writerWG.Add(1)
-	go traceSink(&writerWG, events, cfg)
+	if traceEnabled {
+		events = make(chan traceEvent, cfg.QueueCapacity)
+		writerWG.Add(1)
+		go traceSink(&writerWG, events, cfg)
+	}
 
 	var seq atomic.Uint64
 	seq.Store(1)
@@ -214,8 +202,10 @@ func run(bootstrap *bootstrapLog) (int, error) {
 		bootstrap.Log("real_codex_wait_done", map[string]string{"child_pid": strconv.Itoa(cmd.Process.Pid)})
 	}
 	pipeWG.Wait()
-	close(events)
-	writerWG.Wait()
+	if events != nil {
+		close(events)
+		writerWG.Wait()
+	}
 
 	if waitErr == nil {
 		return 0, nil
@@ -225,6 +215,43 @@ func run(bootstrap *bootstrapLog) (int, error) {
 		return exitErr.ExitCode(), nil
 	}
 	return 1, waitErr
+}
+
+func prepareRuntimeConfig(bootstrap *bootstrapLog) (config, bool, error) {
+	bootstrap.Log("load_config_start", map[string]string{configEnv: os.Getenv(configEnv)})
+	cfg, err := loadConfig()
+	if err != nil {
+		bootstrap.Log("load_config_error", map[string]string{"error": err.Error()})
+		return failOpenConfig(bootstrap, cfg, err)
+	}
+	bootstrap.Log("load_config_done", map[string]string{
+		"real_codex":       cfg.RealCodex,
+		"trace_dir":        cfg.TraceDir,
+		"daemon_url":       cfg.DaemonURL,
+		"fallback_ndjson":  strconv.FormatBool(cfg.FallbackNDJSON),
+		"queue_capacity":   strconv.Itoa(cfg.QueueCapacity),
+		"summary_override": cfg.ReasoningSummaryOverride,
+		"raw_events":       strconv.FormatBool(cfg.EnableExperimentalRawEvents),
+	})
+
+	bootstrap.Log("mkdir_trace_dir_start", map[string]string{"trace_dir": cfg.TraceDir})
+	if err := os.MkdirAll(cfg.TraceDir, 0o700); err != nil {
+		bootstrap.Log("mkdir_trace_dir_error", map[string]string{"trace_dir": cfg.TraceDir, "error": err.Error()})
+		return failOpenConfig(bootstrap, cfg, fmt.Errorf("create trace dir %s: %w", cfg.TraceDir, err))
+	}
+	bootstrap.Log("mkdir_trace_dir_done", map[string]string{"trace_dir": cfg.TraceDir})
+	return cfg, true, nil
+}
+
+func failOpenConfig(bootstrap *bootstrapLog, partial config, traceErr error) (config, bool, error) {
+	cfg, err := loadPassthroughConfig(partial)
+	if err != nil {
+		return config{}, false, fmt.Errorf("trace setup failed (%v), and real codex could not be resolved: %w", traceErr, err)
+	}
+	reason := traceErr.Error()
+	bootstrap.Log("trace_disabled_fail_open", map[string]string{"error": reason, "real_codex": cfg.RealCodex})
+	_, _ = fmt.Fprintf(os.Stderr, "codex-trace-wrapper warning: trace disabled; continuing with real Codex: %v\n", traceErr)
+	return cfg, false, nil
 }
 
 type bootstrapLog struct {
@@ -384,12 +411,8 @@ func loadConfig() (config, error) {
 		cfg.TraceDir = filepath.Join(home, ".codex-trace")
 	}
 
-	info, err := os.Stat(cfg.RealCodex)
-	if err != nil {
-		return cfg, fmt.Errorf("real codex path is not accessible: %s: %w", cfg.RealCodex, err)
-	}
-	if info.IsDir() {
-		return cfg, fmt.Errorf("real codex path is a directory: %s", cfg.RealCodex)
+	if err := validateRealCodex(cfg.RealCodex); err != nil {
+		return cfg, err
 	}
 	if cfg.QueueCapacity <= 0 {
 		cfg.QueueCapacity = defaultQueueCap
@@ -398,6 +421,41 @@ func loadConfig() (config, error) {
 		return cfg, fmt.Errorf("invalid reasoning_summary_override %q; expected auto, concise, detailed, or none", cfg.ReasoningSummaryOverride)
 	}
 	return cfg, nil
+}
+
+func loadPassthroughConfig(partial config) (config, error) {
+	candidates := []string{
+		strings.TrimSpace(os.Getenv(realCodexEnv)),
+		strings.TrimSpace(partial.RealCodex),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if err := validateRealCodex(candidate); err == nil {
+			return config{RealCodex: candidate, QueueCapacity: defaultQueueCap}, nil
+		}
+	}
+
+	discovered, err := discoverRealCodex()
+	if err != nil {
+		return config{}, err
+	}
+	if err := validateRealCodex(discovered); err != nil {
+		return config{}, err
+	}
+	return config{RealCodex: discovered, QueueCapacity: defaultQueueCap}, nil
+}
+
+func validateRealCodex(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("real codex path is not accessible: %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("real codex path is a directory: %s", path)
+	}
+	return nil
 }
 
 func mergeConfig(base, override config) config {
@@ -650,39 +708,66 @@ func traceSink(wg *sync.WaitGroup, events <-chan traceEvent, cfg config) {
 	defer wg.Done()
 
 	healthPath := filepath.Join(cfg.TraceDir, "health.json")
-	var sink traceEventSink
-	var err error
+	var daemon traceEventSink
 	if cfg.DaemonURL != "" {
-		sink = newDaemonSink(cfg.DaemonURL)
+		daemon = newDaemonSink(cfg.DaemonURL)
 	}
-	if sink == nil && cfg.FallbackNDJSON {
-		sink, err = newNDJSONSink(filepath.Join(cfg.TraceDir, "events.ndjson"))
+	var fallback traceEventSink
+	var fallbackErr error
+	if cfg.FallbackNDJSON {
+		fallback, fallbackErr = newNDJSONSink(filepath.Join(cfg.TraceDir, "events.ndjson"))
 	}
-	if sink == nil {
-		writeHealth(healthPath, 0, 0, 0, fmt.Sprintf("trace sink disabled or unavailable: %v", err))
+	if daemon == nil && fallback == nil {
+		writeHealth(healthPath, 0, 0, 0, fmt.Sprintf("trace sink disabled or unavailable: %v", fallbackErr))
 		for range events {
 		}
 		return
 	}
-	defer sink.Close()
+	defer func() {
+		if daemon != nil {
+			_ = daemon.Close()
+		}
+		if fallback != nil {
+			_ = fallback.Close()
+		}
+	}()
 
 	var written uint64
 	var lastSeq uint64
 	var failed uint64
 	for event := range events {
-		if err := sink.Write(event); err != nil {
-			failed++
-			continue
+		wrote := false
+		if daemon != nil {
+			if err := daemon.Write(event); err == nil {
+				wrote = true
+			}
 		}
-		written++
-		lastSeq = event.Seq
-		if written%50 == 0 {
-			_ = sink.Flush()
+		if !wrote && fallback != nil {
+			if err := fallback.Write(event); err == nil {
+				wrote = true
+			}
+		}
+		if wrote {
+			written++
+			lastSeq = event.Seq
+		} else {
+			failed++
+		}
+		if (written+failed)%50 == 0 {
+			flushSink(daemon)
+			flushSink(fallback)
 			writeHealth(healthPath, written, lastSeq, failed, "")
 		}
 	}
-	_ = sink.Flush()
+	flushSink(daemon)
+	flushSink(fallback)
 	writeHealth(healthPath, written, lastSeq, failed, "")
+}
+
+func flushSink(sink traceEventSink) {
+	if sink != nil {
+		_ = sink.Flush()
+	}
 }
 
 type traceEventSink interface {

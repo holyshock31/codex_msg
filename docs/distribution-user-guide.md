@@ -28,7 +28,7 @@ C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 C:\Users\<user>\Documents\CodexTrace\bin\config.toml
 ```
 
-这是项目的稳定默认安装路径。不要把 wrapper 安装到 D 盘开发目录、`AppData\Local`、`Temp` 或 `Downloads`，否则 Codex Desktop 可能报 `spawn EPERM`。
+这是项目的稳定默认安装路径。受管理设备仍可能要求代码签名、管理员审批或安全软件放行；不要把该路径理解为绕过组织策略的方式。
 
 ## 前置条件
 
@@ -174,7 +174,7 @@ CODEX_TRACE_WRAPPER_CONFIG
 
 ### Codex Desktop 报 `spawn EPERM`
 
-通常是组织安全策略拦截了 wrapper 启动路径。
+通常是 Windows 或组织安全策略阻止了外部 wrapper 启动。
 
 检查：
 
@@ -182,13 +182,13 @@ CODEX_TRACE_WRAPPER_CONFIG
 [Environment]::GetEnvironmentVariable("CODEX_CLI_PATH", "User")
 ```
 
-必须是：
+默认应是：
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
 
-如果指向 D 盘、`AppData\Local`、`Temp` 或 `Downloads`，请重新执行安装目录中的：
+如果指向源码、临时构建或下载目录，请重新执行安装目录中的：
 
 ```powershell
 .\codex-trace.ps1 enable
@@ -203,7 +203,7 @@ C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 - viewer 是否已启动。
 - 当前 Codex Desktop 是否产生了新事件。
 
-当前 viewer 主要显示启动后通过 ingest 收到的新事件。重启 viewer 后，未落盘的旧监测历史不会自动恢复。
+viewer 显示启动后通过 ingest 收到的新事件，并从 Review Store 恢复最近的已落盘窗口。尚未刷盘的事件以及超出恢复窗口的旧数据不会自动恢复。
 
 ### 端口被占用
 

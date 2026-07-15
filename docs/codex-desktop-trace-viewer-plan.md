@@ -386,6 +386,8 @@ transcript_root = "C:\\Users\\<user>\\.codex\\sessions"
 
 ## 安全要求
 
+当前状态：默认 HTTP 与 ingest 仅监听 loopback；随机 token、自动脱敏和完整 retention policy 尚未实现。不要把监听地址改为非 loopback，除非先补齐认证、访问控制和敏感字段处理。
+
 trace stream 可能包含：
 
 - prompt 和模型输出。
@@ -394,7 +396,7 @@ trace stream 可能包含：
 - 环境变量值。
 - 如果 app-server 输出相关信息，也可能包含认证相关 metadata。
 
-要求：
+目标要求（当前未全部实现）：
 
 - HTTP 只绑定 `127.0.0.1`。
 - viewer 访问使用随机 token。

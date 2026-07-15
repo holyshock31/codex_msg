@@ -64,7 +64,7 @@ PATH="/home/<user>/.local/codex_trace/bin:$PATH"
 
 ```text
 /home/<user>/.local/codex_trace/bin/codex                  # shim
-/home/<user>/.local/codex_trace/bin/codex-proxy-trace      # 后续开发的远端 proxy trace wrapper
+/home/<user>/.local/codex_trace/bin/codex-proxy-trace      # 远端 proxy trace wrapper
 /home/<user>/.local/codex_trace/log/                       # 可选日志
 /home/<user>/.local/bin/codex                              # 官方原始 codex，不改名、不覆盖
 ```
@@ -101,11 +101,28 @@ case ":$CLEAN_PATH:" in
   *) CLEAN_PATH="$HOME/.local/bin:$CLEAN_PATH" ;;
 esac
 
-REAL_CODEX="$(PATH="$CLEAN_PATH" command -v codex || true)"
+REAL_CODEX="${CODEX_TRACE_REAL_CODEX:-}"
+if [ -z "$REAL_CODEX" ]; then
+  REAL_CODEX="$(PATH="$CLEAN_PATH" command -v codex || true)"
+fi
+if [ -z "$REAL_CODEX" ]; then
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/codex; do
+    if [ -x "$candidate" ]; then
+      REAL_CODEX="$candidate"
+      break
+    fi
+  done
+fi
 if [ -z "$REAL_CODEX" ]; then
   echo "codex trace shim: real codex not found after removing $TRACE_BIN from PATH" >&2
   exit 127
 fi
+
+REAL_CODEX_DIR="$(dirname "$REAL_CODEX")"
+case ":$CLEAN_PATH:" in
+  *":$REAL_CODEX_DIR:"*) ;;
+  *) CLEAN_PATH="$REAL_CODEX_DIR:$CLEAN_PATH" ;;
+esac
 
 if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "proxy" ]; then
   export PATH="$CLEAN_PATH"
@@ -485,10 +502,94 @@ RemoteForward 127.0.0.1:45124 127.0.0.1:45124
 CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45124
 ```
 
-本机 WSL2 NAT 模式下，如果不走 SSH tunnel，远端 wrapper 可直接连 Windows host gateway，例如当前机器查到的是：
+WSL2 NAT 模式下，如果不走 SSH tunnel，远端 wrapper 可以连接动态探测到的 Windows host gateway：
 
 ```text
-CODEX_TRACE_DAEMON_URL=tcp://<windows-host-ip>:45124
+CODEX_TRACE_DAEMON_URL=tcp://<windows-host-gateway>:45124
 ```
 
-6. 重启 Codex Desktop，连接远端会话。viewer Timeline 应出现 `source=remote`、`transport=ssh-proxy-websocket` 的 `trace/status` 和 JSON-RPC event。
+6. 关闭旧的远端会话并重新建立 SSH/proxy 连接，让新的 SSH session 读取 `RemoteForward` 和远端环境变量。WSL 不需要重启；只有 Desktop 持续复用旧连接、无法重新拉起 proxy 时才需要重启 Codex Desktop。viewer Timeline 应出现 `source=remote`、`transport=ssh-proxy-websocket` 的 `trace/status` 和 JSON-RPC event。
+
+### 实时监测覆盖边界
+
+SSH trace wrapper 只能记录经过当前 `app-server proxy` WebSocket 连接的消息。为了完整记录主线程和新建 subagent，启动顺序应为：
+
+```text
+Windows viewer 启动并监听 45123/45124
+  -> 建立带 RemoteForward 的 SSH 连接
+  -> Codex Desktop 启动远端 app-server proxy
+  -> proxy WebSocket 完成 initialize
+  -> 在该远端会话中启动任务和 subagent
+```
+
+app-server 对新建 subagent 有自动订阅机制：core 创建 child thread 后发送一次内存中的 `thread_created` 广播；app-server 收到广播后，把当时所有已初始化的连接加入 child thread 的订阅集合。child 后续产生的 `turn/*`、`item/*` 等通知会经过当前 Desktop/proxy WebSocket，因此 wrapper 可以实时采集。
+
+需要注意以下边界：
+
+- `thread_created` 是进程内广播，不是持久化事件。新的 app-server/proxy 连接不会收到连接建立前已经发生的创建广播。
+- 连接初始化只会登记该连接，不会扫描磁盘上的既有 child thread 并自动补订阅。
+- `thread/list` 返回的是线程 metadata；它不会因为列出了 child thread 就为当前连接挂 listener，也不会默认返回 turns。
+- 父线程中的 `subAgentActivity` 只包含 child 标识、状态和路径等关联信息，不包含 child 自己的完整 transcript。
+- 对本次运行中新建的 child，listener 启动稍晚通常不会直接丢失最初事件：child 的 core 事件队列是内存中的 unbounded queue，而且创建广播发生在初始输入投递之前。但事件一旦已被 listener 消费并发送给当时的订阅连接，后加入的连接不会收到历史重放。
+- 如果 app-server/proxy 在 child 结束后才启动，内存事件队列已经不存在，只剩远端 rollout 文件。此时必须显式读取历史或执行 rollout 回灌。
+
+实际运行版本 `codex-cli 0.144.3` 已核对上述行为；`0.142.5` 源码中的对应实现也一致。关键实现位置：
+
+```text
+codex-rs/app-server/src/lib.rs
+  thread_created_rx.recv() -> 收集当前 initialized connection IDs
+
+codex-rs/app-server/src/request_processors/thread_processor.rs
+  try_attach_thread_listener() -> 给 child 添加连接订阅
+
+codex-rs/core/src/agent/control/spawn.rs
+  notify_thread_created() -> 先广播创建，再投递 child 初始输入
+
+codex-rs/core/src/session/mod.rs
+  async_channel::unbounded() -> child 实时事件内存队列
+```
+
+实时链路验证应使用监控建立后新建的任务，不要用旧任务判断自动订阅是否有效。成功时，同一个 remote `sourceId/connectionId` 下应同时出现：
+
+```text
+父线程：subAgentActivity
+子线程：turn/started、item/started、item/completed、turn/completed
+```
+
+如果只有父线程 `subAgentActivity`，先检查 child 创建时 proxy 是否已经启动并完成 initialize；如果 child 创建早于当前 proxy 进程，则直接使用下面的历史回灌方案。
+
+### Subagent rollout 内容回灌
+
+如果 Windows viewer 中主线程有内容，但 subagent 线程只有 metadata、`0 turns / 0 blocks`，先比较 child 创建时间和当前 proxy 连接建立时间。若当前 proxy 启动得更晚，这不是 SSH forward、wrapper 丢包或 viewer 渲染问题，而是当前连接从未订阅过该 child，app-server 也不会自动向新连接重放磁盘历史。
+
+child 的 turn/item 历史仍保存在远端 `~/.codex/sessions/**/rollout-*.jsonl`。可以通过 app-server 的 `thread/read(includeTurns=true)`、`thread/turns/list(itemsView=full)` 主动读取，或者使用当前脚本把主要 rollout 事件转换为 viewer 兼容事件。脚本会过滤非展示事件、加密内容，并受每文件事件上限约束，因此回灌结果不是原始 rollout 的无损副本。现阶段采用 rollout backfill，避免修改 Desktop 与 app-server 的请求流程。
+
+远端已安装脚本后，可按父线程 ID 回灌：
+
+```powershell
+scp <clone-directory>\codex-trace-wrapper\scripts\codex-remote-rollout-backfill.py <ssh-host>:/home/<user>/.local/codex_trace/bin/codex-remote-rollout-backfill.py
+
+ssh <ssh-host> "python3 /home/<user>/.local/codex_trace/bin/codex-remote-rollout-backfill.py --parent-thread-id <root-thread-id> --dry-run"
+
+ssh <ssh-host> "python3 /home/<user>/.local/codex_trace/bin/codex-remote-rollout-backfill.py --parent-thread-id <root-thread-id>"
+```
+
+也可以只回灌单个子线程或单个文件：
+
+```powershell
+ssh <ssh-host> "python3 /home/<user>/.local/codex_trace/bin/codex-remote-rollout-backfill.py --thread-id <subagent-thread-id>"
+
+ssh <ssh-host> "python3 /home/<user>/.local/codex_trace/bin/codex-remote-rollout-backfill.py --file /home/<user>/.codex/sessions/YYYY/MM/DD/rollout-...jsonl"
+```
+
+rollout 可能包含 prompt、文件内容、工具参数和命令输出。回灌前先使用 `--dry-run` 核对文件范围，只把数据发送到可信且受控的 viewer ingest。
+
+验证：
+
+```powershell
+$model = Invoke-RestMethod 'http://127.0.0.1:45123/api/conversations' -TimeoutSec 30
+$s = $model.sessions | Where-Object id -eq '<root-thread-id>'
+$s.threads | Select-Object id,threadSource,parentThreadId,agentNickname,@{n='turns';e={($_.turns|Measure-Object).Count}},blocks,events
+```
+
+预期 subagent 线程从 `0 turns / 0 blocks` 变为有 turn 和 blocks。`ssh <ssh-host>` 输出 `Warning: remote port forwarding failed for listen port 45124` 时，如果已有一条 SSH 连接占用了 `RemoteForward`，这个警告可以忽略；只要脚本能连到远端 `127.0.0.1:45124`，事件会经 SSH tunnel 回到 Windows viewer。

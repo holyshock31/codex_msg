@@ -795,6 +795,7 @@ h1 {
 .conversationMessages {
   height: 100%;
   overflow: auto;
+  overflow-anchor: none;
   scroll-padding-top: 16px;
   padding: 18px clamp(18px, 4vw, 56px) 36px clamp(214px, 16vw, 246px);
   background: #ffffff;
@@ -825,6 +826,31 @@ h1 {
   display: grid;
   align-content: start;
   gap: 4px;
+}
+
+.followLatestBtn {
+  position: absolute;
+  z-index: 8;
+  top: 16px;
+  right: 20px;
+  border: 1px solid rgba(15, 118, 110, 0.28);
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(16, 24, 40, 0.12);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+}
+
+.followLatestBtn:hover {
+  border-color: rgba(15, 118, 110, 0.45);
+  background: var(--accent-soft);
+}
+
+.followLatestBtn[hidden] {
+  display: none;
 }
 
 .segmentRailItem {

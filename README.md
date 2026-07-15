@@ -7,9 +7,9 @@ Codex Desktop 的常规对话界面以任务交互为主，不会完整展示 De
 本项目的核心目的，是在不改变 Codex 主链路的前提下复制并保留这份消息流，然后提供两个互补的查看方式：
 
 - Conversation：将原始事件整理成 session、turn 和 item，方便按会话阅读。
-- Timeline / Full info：尽量保留完整协议事件、原始字段和上下文，方便检查消息细节。
+- Timeline / Full info：保留有界的协议事件、原始字段和上下文样本，方便检查消息细节；超长内容和流式增量可能被聚合、采样或截断。
 
-在完整 trace 的基础上，可以进一步用于：
+在可回溯 trace 的基础上，可以进一步用于：
 
 - 查看 Codex 实际发送和接收了哪些 app-server 消息。
 - 还原 user、assistant、thinking、工具调用、命令和文件修改的事件顺序。
@@ -24,13 +24,13 @@ Codex Desktop 的常规对话界面以任务交互为主，不会完整展示 De
 ## 主要能力
 
 - 透明采集 Codex Desktop 与 app-server 的 stdin/stdout JSONL 消息。
-- Conversation 视图按 session、turn、item 展示完整会话。
-- Timeline 视图保留原始协议事件和 Full info，便于复现和调试。
+- Conversation 视图按 session、turn、item 整理会话内容。
+- Timeline 视图保留有界的原始协议事件和 Full info 样本，便于复现和调试。
 - 显示 turn 持续时间以及 item 之间的时间间隔。
 - 展示 user、assistant、thinking、command、MCP tool、file change、plan、diff 等内容。
 - 支持 turn/item 单击快速跳转、会话筛选和 token 使用分析。
 - 使用本地 Review Store 分段保存历史，viewer 重启后可以恢复最近记录。
-- 采集链路按 fail-open 设计，viewer 不可用时不应阻断 Codex 的正常主链路。
+- 采集链路按 fail-open 设计：配置、日志目录、viewer 或持久化不可用时降级为纯透传；只有真实 Codex 无法定位或启动时才阻断主链路。
 
 ## 快速开始
 
@@ -71,6 +71,26 @@ http://127.0.0.1:45123/
 ```
 
 新产生的对话、thinking、工具调用、命令输出和文件修改会出现在 viewer 中。
+
+### 直接下载 Windows 包
+
+不需要 Go 开发环境时，可以从 [GitHub Releases](https://github.com/holyshock31/codex_msg/releases) 下载：
+
+```text
+CodexTrace.zip
+CodexTrace.zip.sha256
+```
+
+校验并解压后执行：
+
+```powershell
+(Get-FileHash .\CodexTrace.zip -Algorithm SHA256).Hash
+Expand-Archive .\CodexTrace.zip .\CodexTrace
+cd .\CodexTrace
+.\codex-trace.ps1 install
+```
+
+发布包已经包含编译后的 wrapper，因此不需要 Go；当前仍需要 Node.js 20+。发布的 wrapper 未进行商业代码签名，受管理设备可能要求管理员审批或自行签名。
 
 ## 日常使用
 
@@ -123,11 +143,13 @@ wrapper 原样转发 Desktop 与 app-server 的标准输入输出，同时向本
 - 实验性 raw events 请求改写默认关闭，需要时在 `bin\config.toml` 中显式开启。
 - 项目不会修改 Codex Desktop 安装文件；执行 `disable` 即可移除相关用户环境变量。
 
-某些终端安全软件可能阻止 Codex Desktop 从临时目录或下载目录启动未签名 wrapper。默认安装位置为：
+受管理的 Windows 设备可能按照组织策略阻止未签名程序启动。默认安装位置为：
 
 ```text
 C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 ```
+
+该路径只是稳定的默认安装位置，不用于绕过组织安全策略。遇到 `spawn EPERM` 时，应优先检查代码签名、管理员审批和终端安全策略。
 
 ## 当前限制
 
@@ -165,7 +187,7 @@ docs/                  设计、使用和排障文档
 
 - 增加按 session、thread 和 turn 的历史分页读取，降低大型存储的启动和刷新成本。
 - 完善进程健康检查、丢弃事件统计和连接诊断。
-- 增加更完整的端到端测试和稳定的 Windows 安装包发布流程。
+- 为 Windows 发布包增加代码签名、SBOM 和 portable Node，降低目标机器依赖。
 - 完善远端 SSH/WSL trace 的部署、回滚和多会话支持。
 - 增加可控的导出与脱敏能力，方便提交可复现的问题样本。
 
