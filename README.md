@@ -91,7 +91,7 @@ cd .\CodexTrace
 .\codex-trace.ps1 install
 ```
 
-发布包已经包含编译后的 wrapper，因此不需要 Go；当前仍需要 Node.js 20+。Release 同时提供 CycloneDX SBOM 和 GitHub 构建来源证明。发布的 wrapper 未进行商业 Authenticode 代码签名，受管理设备可能要求管理员审批或自行签名。
+发布包已经包含编译后的 wrapper，因此不需要 Go；当前仍需要 Node.js 20+。Release 同时提供 CycloneDX SBOM 和 GitHub 构建来源证明。`v0.1.0` 的 wrapper 尚未进行 Authenticode 代码签名；后续发布流程已改为必须通过 SignPath 签名和时间戳验证，配置说明见 [Windows 发布签名](docs/release-signing.md)。
 
 ## 日常使用
 
@@ -165,6 +165,8 @@ C:\Users\<user>\Documents\CodexTrace\bin\codex-trace-wrapper.exe
 
 - [分发与使用指南](docs/distribution-user-guide.md)
 - [本地开发与构建指南](docs/development-guide.md)
+- [Windows 发布签名](docs/release-signing.md)
+- [隐私说明](PRIVACY.md)
 - [项目状态与技术决策](docs/project-status.md)
 - [功能建议备忘](docs/feature-suggestions-memo.md)
 - [SSH/WSL 远端 trace 方案](docs/handoff-ssh-wsl-remote-trace.md)
@@ -188,7 +190,7 @@ docs/                  设计、使用和排障文档
 
 - 增加按 session、thread 和 turn 的历史分页读取，降低大型存储的启动和刷新成本。
 - 完善进程健康检查、丢弃事件统计和连接诊断。
-- 为 Windows 发布包增加代码签名、SBOM 和 portable Node，降低目标机器依赖。
+- 完成 SignPath Foundation 审批并启用 Windows 代码签名，同时加入 portable Node，降低目标机器依赖。
 - 完善远端 SSH/WSL trace 的部署、回滚和多会话支持。
 - 增加可控的导出与脱敏能力，方便提交可复现的问题样本。
 
