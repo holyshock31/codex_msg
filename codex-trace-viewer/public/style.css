@@ -15,8 +15,8 @@
   --row: #ffffff;
   --row-hover: #edf7f5;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --session-pane-width: 360px;
-  --segment-detail-height: 280px;
+  --session-pane-width: 300px;
+  --segment-detail-width: 440px;
 }
 
 * {
@@ -26,6 +26,7 @@
 body {
   margin: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
   min-height: 100vh;
@@ -215,18 +216,14 @@ h1 {
   cursor: row-resize;
 }
 
-.splitterHorizontal {
+.detailSplitter {
   display: none;
-  position: absolute;
-  right: 0;
-  bottom: var(--segment-detail-height);
-  left: 0;
-  z-index: 13;
-  height: 6px;
-  cursor: row-resize;
+  width: 6px;
+  min-width: 6px;
+  cursor: col-resize;
 }
 
-.chatShell.detailOpen .splitterHorizontal {
+.chatShell.detailOpen .detailSplitter {
   display: block;
 }
 
@@ -774,6 +771,9 @@ h1 {
 
 .chatShell {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -782,7 +782,17 @@ h1 {
   background: #ffffff;
 }
 
+.chatShell.detailOpen {
+  grid-template-columns: minmax(0, 1fr) 6px minmax(340px, var(--segment-detail-width));
+}
+
 .messagesFrame {
+  --aggregate-rail-width: clamp(120px, 8vw, 180px);
+  --segment-rail-width: clamp(180px, 11vw, 240px);
+  --rail-dock-gap: clamp(80px, 7vw, 140px);
+  --rail-dock-left: 10px;
+  --rail-content-gap: clamp(72px, 6vw, 120px);
+  --conversation-content-width: 100%;
   position: relative;
   width: 100%;
   max-width: 100%;
@@ -797,22 +807,33 @@ h1 {
   overflow: auto;
   overflow-anchor: none;
   scroll-padding-top: 16px;
-  padding: 18px clamp(18px, 4vw, 56px) 36px clamp(214px, 16vw, 246px);
+  padding: 18px 18px 36px
+    calc(
+      var(--rail-dock-left) + var(--aggregate-rail-width) + var(--rail-dock-gap) + var(--segment-rail-width) +
+        var(--rail-content-gap)
+    );
   background: #ffffff;
 }
 
-.chatShell.detailOpen .conversationMessages {
-  padding-bottom: calc(var(--segment-detail-height) + 36px);
-}
-
-.segmentRail {
+.railDock {
   position: absolute;
   z-index: 6;
   top: 14px;
-  left: max(10px, calc((100% - 960px) / 2 - 208px));
+  bottom: 14px;
+  left: var(--rail-dock-left);
+  display: grid;
+  grid-template-columns: var(--aggregate-rail-width) var(--segment-rail-width);
+  align-items: start;
+  gap: var(--rail-dock-gap);
+  width: calc(var(--aggregate-rail-width) + var(--rail-dock-gap) + var(--segment-rail-width));
+  min-height: 0;
+  pointer-events: none;
+}
+
+.segmentRail {
   display: none;
-  width: 194px;
-  max-height: calc(100% - 28px);
+  width: var(--segment-rail-width);
+  max-height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 5px;
@@ -820,12 +841,169 @@ h1 {
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 6px 14px rgba(16, 24, 40, 0.08);
+  pointer-events: auto;
 }
 
 .segmentRail.open {
   display: grid;
   align-content: start;
   gap: 4px;
+}
+
+.aggregateLinks {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.aggregateLink {
+  fill: none;
+  stroke: rgba(15, 118, 110, 0.48);
+  stroke-width: 1.5;
+}
+
+.itemLink {
+  fill: none;
+  stroke: rgba(15, 118, 110, 0.58);
+  stroke-width: 1.5;
+}
+
+.aggregateLink.offscreen,
+.itemLink.offscreen {
+  stroke: rgba(100, 116, 139, 0.62);
+  stroke-dasharray: 4 4;
+  stroke-width: 1.25;
+}
+
+.aggregateLinkCountBadge {
+  fill: #ffffff;
+  stroke: rgba(100, 116, 139, 0.7);
+  stroke-width: 1.25;
+}
+
+.aggregateLinkCountText {
+  fill: #475569;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.aggregateLink.kind-plan {
+  stroke: rgba(124, 77, 0, 0.56);
+}
+
+.aggregateLink.kind-diff,
+.aggregateLink.kind-file {
+  stroke: rgba(29, 78, 216, 0.5);
+}
+
+.aggregateLinkDot {
+  fill: #ffffff;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.aggregateRail {
+  display: none;
+  width: var(--aggregate-rail-width);
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 6px 14px rgba(16, 24, 40, 0.08);
+  pointer-events: auto;
+}
+
+.aggregateRail.open {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.aggregateRailHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.aggregateRailHeader span {
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+}
+
+.aggregateRailList {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 5px;
+}
+
+.aggregateCard {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.aggregateCard:hover {
+  border-color: rgba(100, 116, 139, 0.32);
+  background: #f8fafc;
+}
+
+.aggregateCard.active {
+  border-color: rgba(15, 118, 110, 0.42);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 rgba(15, 118, 110, 0.5);
+}
+
+.aggregateCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.aggregateCardTop strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aggregateCardTop span {
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.aggregateCardItems {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .followLatestBtn {
@@ -885,6 +1063,11 @@ h1 {
   color: var(--accent);
 }
 
+.segmentRailItem.aggregateRelated {
+  border-color: rgba(15, 118, 110, 0.22);
+  box-shadow: inset 3px 0 0 rgba(15, 118, 110, 0.42);
+}
+
 .segmentRailItem:hover .segmentRailGap,
 .segmentRailItem.active .segmentRailGap {
   color: inherit;
@@ -916,8 +1099,8 @@ h1 {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  width: min(100%, 960px);
-  margin: 18px auto 8px;
+  width: min(100%, var(--conversation-content-width));
+  margin: 18px 0 8px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: #f8fafc;
@@ -952,8 +1135,8 @@ h1 {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(100%, 960px);
-  margin: 22px auto 14px;
+  width: min(100%, var(--conversation-content-width));
+  margin: 22px 0 14px;
   color: var(--muted);
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
@@ -1014,8 +1197,8 @@ h1 {
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(100%, 960px);
-  margin: 7px auto;
+  width: min(100%, var(--conversation-content-width));
+  margin: 7px 0;
   color: #8793a1;
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 10px;
@@ -1051,8 +1234,8 @@ h1 {
 }
 
 .messageBlock {
-  width: min(100%, 960px);
-  margin: 12px auto;
+  width: min(100%, var(--conversation-content-width));
+  margin: 12px 0;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel);
@@ -1083,16 +1266,26 @@ h1 {
     0 2px 8px rgba(16, 24, 40, 0.08);
 }
 
+.aggregatePartBadge {
+  border: 1px solid rgba(15, 118, 110, 0.26);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 1px 5px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 9px;
+}
+
 .messageBlock.role-user {
   width: min(76%, 760px);
   margin-left: auto;
-  margin-right: max(0px, calc((100% - 960px) / 2));
+  margin-right: 0;
   border-color: #bad7f5;
   background: #f4f9ff;
 }
 
 .messageBlock.role-assistant {
-  margin-left: max(0px, calc((100% - 960px) / 2));
+  margin-left: 0;
   margin-right: auto;
   border-color: var(--border-soft);
   box-shadow: none;
@@ -1125,8 +1318,8 @@ h1 {
 }
 
 .contextCompactionMarker {
-  width: min(100%, 960px);
-  margin: 14px auto;
+  width: min(100%, var(--conversation-content-width));
+  margin: 14px 0;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -1254,6 +1447,101 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.planContent {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 11px 14px 13px;
+}
+
+.planContentSummary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.planContentSummary strong {
+  color: var(--text);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 13px;
+}
+
+.planProgressTrack {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #e2e8f0;
+}
+
+.planProgressFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f766e;
+}
+
+.planStepList {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.planStepItem {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.planStepItem:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.planStepStatus {
+  border-radius: 3px;
+  background: #eef2f6;
+  color: #64748b;
+  padding: 2px 4px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 9px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.planStepItem.status-completed .planStepStatus {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.planStepItem.status-active .planStepStatus {
+  background: #ccfbf1;
+  color: #0f766e;
+}
+
+.planStepItem.status-failed .planStepStatus {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.planStepText {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .messageBlock pre {
   min-width: 0;
   margin: 0;
@@ -1269,18 +1557,15 @@ h1 {
 
 .segmentDetail {
   display: none;
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
   z-index: 12;
   grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
   min-width: 0;
   min-height: 0;
-  height: var(--segment-detail-height);
-  border-top: 1px solid var(--border);
+  height: 100%;
+  border-left: 1px solid var(--border);
   background: rgba(252, 252, 250, 0.98);
-  box-shadow: 0 -12px 28px rgba(16, 24, 40, 0.12);
+  box-shadow: -12px 0 28px rgba(16, 24, 40, 0.1);
   backdrop-filter: blur(10px);
 }
 
@@ -1312,6 +1597,78 @@ h1 {
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
+}
+
+.segmentContentHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.segmentEncodingControls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.segmentEncodingControls[hidden] {
+  display: none;
+}
+
+.segmentEncodingBadge {
+  max-width: min(42vw, 330px);
+  overflow: hidden;
+  border: 1px solid rgba(15, 118, 110, 0.28);
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #0f766e;
+  padding: 3px 7px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmentEncodingBadge.partial {
+  border-color: rgba(180, 83, 9, 0.3);
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.segmentEncodingModes {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(72px, auto));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.segmentEncodingModes button {
+  min-height: 26px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.segmentEncodingModes button:last-child {
+  border-right: 0;
+}
+
+.segmentEncodingModes button:hover,
+.segmentEncodingModes button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .segmentDetailHeader {
@@ -1379,6 +1736,25 @@ h1 {
   word-break: break-word;
 }
 
+@media (max-width: 1500px) {
+  .chatShell.detailOpen {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chatShell.detailOpen .detailSplitter {
+    display: none;
+  }
+
+  .segmentDetail {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(520px, 88vw);
+    height: auto;
+  }
+}
+
 .segmentRawBackdrop {
   display: none;
 }
@@ -1398,8 +1774,8 @@ h1 {
   left: 50%;
   display: none;
   grid-template-rows: auto minmax(0, 1fr);
-  width: min(980px, calc(100vw - 40px));
-  height: min(76vh, 760px);
+  width: min(1160px, calc(100vw - 40px));
+  height: min(82vh, 820px);
   min-height: 260px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1431,7 +1807,7 @@ h1 {
 }
 
 .segmentRawMeta {
-  max-width: min(620px, 70vw);
+  max-width: min(820px, 74vw);
   overflow: hidden;
   color: var(--muted);
   font-family: Consolas, "SFMono-Regular", monospace;
@@ -1440,7 +1816,172 @@ h1 {
   white-space: nowrap;
 }
 
-#segmentRawPre {
+.segmentEventDetails {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.segmentEventSidebar {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: #f8fafc;
+}
+
+.segmentEventSummary {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.segmentEventList {
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+}
+
+.segmentEventRow {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  padding: 7px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.segmentEventRow:hover {
+  border-color: #d7e1e8;
+  background: #ffffff;
+}
+
+.segmentEventRow.active {
+  border-color: rgba(15, 118, 110, 0.34);
+  background: #eaf6f3;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.segmentEventRowTop,
+.segmentEventRowMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.segmentEventRowSeq,
+.segmentEventRowMeta {
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+}
+
+.segmentEventRowMethod {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmentEventOmitted {
+  padding: 8px 6px;
+  color: var(--muted);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+.segmentEventMain {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: #ffffff;
+}
+
+.segmentEventTabs {
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  min-height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fafc;
+}
+
+.segmentEventTab {
+  align-self: stretch;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.segmentEventTab:hover {
+  color: var(--text);
+}
+
+.segmentEventTab.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.segmentEventPanel {
+  display: none;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.segmentEventPanel.active {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.segmentOriginalStatus {
+  min-height: 34px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.segmentOriginalStatus.complete {
+  color: #166534;
+  background: #f0fdf4;
+}
+
+.segmentOriginalStatus.sampled,
+.segmentOriginalStatus.loading {
+  color: #854d0e;
+  background: #fffbeb;
+}
+
+.segmentOriginalStatus.error {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+#segmentOriginalPre {
   min-height: 0;
   margin: 0;
   padding: 12px;
@@ -1451,6 +1992,56 @@ h1 {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.segmentProcessedContent {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.processedGroup {
+  margin-bottom: 16px;
+}
+
+.processedGroup:last-child {
+  margin-bottom: 0;
+}
+
+.processedGroupTitle {
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.processedGrid {
+  display: grid;
+  grid-template-columns: minmax(130px, 180px) minmax(0, 1fr);
+  margin: 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.processedGrid dt,
+.processedGrid dd {
+  min-width: 0;
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.processedGrid dt {
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.processedGrid dd {
+  color: var(--text);
 }
 
 .role-tool pre,
@@ -1663,7 +2254,18 @@ h1 {
 @media (max-width: 980px) {
   .topbar {
     align-items: flex-start;
+    flex-wrap: wrap;
     padding: 10px 12px;
+  }
+
+  .topbar > div:first-child {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+
+  .actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   h1 {
@@ -1703,12 +2305,22 @@ h1 {
   }
 
   .conversationMessages {
-    padding: 12px 12px 22px 136px;
+    padding: 12px 12px 22px
+      calc(
+        var(--rail-dock-left) + var(--aggregate-rail-width) + var(--rail-dock-gap) + var(--segment-rail-width) +
+          var(--rail-content-gap)
+      );
+  }
+
+  .messagesFrame {
+    --aggregate-rail-width: 76px;
+    --segment-rail-width: 112px;
+    --rail-dock-gap: 6px;
+    --rail-dock-left: 6px;
+    --rail-content-gap: 12px;
   }
 
   .segmentRail {
-    left: 6px;
-    width: 122px;
     padding: 4px;
   }
 
@@ -1819,6 +2431,84 @@ h1 {
   }
 }
 
+@media (max-width: 720px) {
+  .segmentEventDetails {
+    grid-template-columns: 1fr;
+    grid-template-rows: 132px minmax(0, 1fr);
+  }
+
+  .segmentEventSidebar {
+    grid-template-rows: auto minmax(0, 1fr);
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .segmentEventList {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .segmentEventRow {
+    flex: 0 0 178px;
+    margin: 0;
+  }
+
+  .segmentEventOmitted {
+    flex: 0 0 110px;
+    align-content: center;
+  }
+
+  .processedGrid {
+    grid-template-columns: minmax(100px, 132px) minmax(0, 1fr);
+  }
+
+  .conversationMessages {
+    padding: 96px 10px 22px;
+  }
+
+  .railDock {
+    top: 6px;
+    right: 6px;
+    bottom: auto;
+    left: 6px;
+    display: block;
+    width: auto;
+  }
+
+  .segmentRail {
+    display: none !important;
+  }
+
+  .aggregateRail,
+  .aggregateRail.open {
+    display: grid;
+    width: auto;
+    max-height: 82px;
+  }
+
+  .aggregateRailHeader {
+    min-height: 28px;
+    padding: 4px 7px;
+  }
+
+  .aggregateRailList {
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 5px;
+  }
+
+  .aggregateCard {
+    flex: 0 0 112px;
+  }
+
+  .aggregateLinks {
+    display: none;
+  }
+}
+
 @media (max-width: 560px) {
   .topbar {
     display: grid;
@@ -1831,6 +2521,29 @@ h1 {
 
   .layout {
     height: 100%;
+  }
+
+  .segmentDetail {
+    position: fixed;
+    z-index: 25;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border-left: 0;
+  }
+
+  .segmentContentHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .segmentEncodingControls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .segmentEncodingBadge {
+    max-width: 100%;
   }
 
   .conversationLayout {

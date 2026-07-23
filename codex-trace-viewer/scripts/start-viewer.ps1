@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Port = if ($env:CODEX_TRACE_VIEWER_PORT) { $env:CODEX_TRACE_VIEWER_PORT } else { "45123" }
+$Port = if ($env:CODEX_TRACE_VIEWER_PORT) { [int]$env:CODEX_TRACE_VIEWER_PORT } else { 45123 }
+$IngestPort = if ($env:CODEX_TRACE_INGEST_PORT) { [int]$env:CODEX_TRACE_INGEST_PORT } else { 45124 }
 $LogDir = Join-Path $Root "logs"
 $PidFile = Join-Path $LogDir "viewer.pid"
 $StdoutLog = Join-Path $LogDir "viewer.out.log"
@@ -9,9 +10,14 @@ $StderrLog = Join-Path $LogDir "viewer.err.log"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-$existing = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ([int]$Port) -State Listen -ErrorAction SilentlyContinue
-if ($existing) {
-  throw "Port 127.0.0.1:$Port is already in use by process $($existing.OwningProcess | Select-Object -Unique)"
+foreach ($requiredPort in @($Port, $IngestPort)) {
+  $existing = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $requiredPort -State Listen -ErrorAction SilentlyContinue)
+  if ($existing.Count -eq 0) { continue }
+  $owners = @($existing | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+    $owner = Get-Process -Id $_ -ErrorAction SilentlyContinue
+    if ($owner) { "PID $_ ($($owner.ProcessName))" } else { "PID $_" }
+  })
+  throw "Port 127.0.0.1:$requiredPort is already in use by $($owners -join ', '). The viewer requires both ports $Port and $IngestPort."
 }
 
 $bundledNode = Join-Path (Resolve-Path (Join-Path $Root "..")) "runtime\node.exe"
@@ -39,7 +45,44 @@ $process = Start-Process -FilePath $node `
   -PassThru
 
 Set-Content -LiteralPath $PidFile -Value $process.Id -Encoding ASCII
-Start-Sleep -Milliseconds 800
+
+$healthy = $false
+$deadline = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $deadline) {
+  $process.Refresh()
+  if ($process.HasExited) { break }
+  $viewerListener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -eq $process.Id }
+  $ingestListener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $IngestPort -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.OwningProcess -eq $process.Id }
+  if ($viewerListener -and $ingestListener) {
+    try {
+      $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 2
+      if ($response.StatusCode -eq 200) {
+        $healthy = $true
+        break
+      }
+    } catch {
+      # The listeners can become visible just before the HTTP endpoint is ready.
+    }
+  }
+  Start-Sleep -Milliseconds 200
+}
+
+if (-not $healthy) {
+  $process.Refresh()
+  if (-not $process.HasExited) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+  $stderrTail = if (Test-Path -LiteralPath $StderrLog -PathType Leaf) {
+    (Get-Content -LiteralPath $StderrLog -Tail 20 -ErrorAction SilentlyContinue) -join [Environment]::NewLine
+  } else {
+    ""
+  }
+  $detail = if ($stderrTail) { "`n$stderrTail" } else { "" }
+  throw "Codex trace viewer failed to become healthy within 8 seconds.$detail"
+}
 
 Write-Host "Codex trace viewer started."
 Write-Host "URL: http://127.0.0.1:$Port"

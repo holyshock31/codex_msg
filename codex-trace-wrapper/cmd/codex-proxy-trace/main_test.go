@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestLoadConfigUsesRemoteForwardPortByDefault(t *testing.T) {
+	t.Setenv(daemonURLEnv, "")
+	cfg, err := loadConfig(nil)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.DaemonURL != "tcp://127.0.0.1:45125" {
+		t.Fatalf("DaemonURL = %q, want remote forward port 45125", cfg.DaemonURL)
+	}
+}
+
 func TestHTTPThenWSParserEmitsJSONRPC(t *testing.T) {
 	events := make(chan traceEvent, 10)
 	var seq atomic.Uint64

@@ -101,10 +101,14 @@
         <div class="chatShell">
           <div class="messagesFrame">
             <div id="conversationMessages" class="conversationMessages"></div>
-            <nav id="segmentRail" class="segmentRail" aria-label="Current turn segments"></nav>
+            <div class="railDock">
+              <aside id="aggregateRail" class="aggregateRail" aria-label="Current turn aggregates"></aside>
+              <nav id="segmentRail" class="segmentRail" aria-label="Current turn segments"></nav>
+            </div>
+            <svg id="aggregateLinks" class="aggregateLinks" aria-hidden="true"></svg>
             <button id="followLatestBtn" class="followLatestBtn" type="button" hidden>New updates</button>
           </div>
-          <div id="detailSplitter" class="splitter splitterHorizontal" role="separator" aria-orientation="horizontal" aria-label="Resize segment detail"></div>
+          <div id="detailSplitter" class="splitter detailSplitter" role="separator" aria-orientation="vertical" aria-label="Resize segment detail"></div>
           <aside id="segmentDetail" class="segmentDetail" aria-live="polite">
             <div class="segmentDetailHeader">
               <div>
@@ -112,13 +116,22 @@
                 <div id="segmentDetailMeta" class="segmentDetailMeta">Select a segment.</div>
               </div>
               <div class="segmentDetailActions">
-                <button id="openSegmentRawBtn" type="button" aria-label="Open segment full info">详情</button>
+                <button id="openSegmentRawBtn" type="button" aria-label="Open event details">详情</button>
                 <button id="closeSegmentDetailBtn" type="button" aria-label="Close segment detail">Close</button>
               </div>
             </div>
             <div class="segmentDetailBody">
               <section class="segmentDetailSection">
-                <div class="segmentSectionTitle">Content</div>
+                <div class="segmentSectionTitle segmentContentHeader">
+                  <span>Content</span>
+                  <div id="segmentEncodingControls" class="segmentEncodingControls" hidden>
+                    <span id="segmentEncodingBadge" class="segmentEncodingBadge"></span>
+                    <div class="segmentEncodingModes" role="group" aria-label="Command output encoding view">
+                      <button id="segmentRecoveredBtn" type="button" aria-pressed="false">Recovered</button>
+                      <button id="segmentOriginalBtn" type="button" aria-pressed="true">Original</button>
+                    </div>
+                  </div>
+                </div>
                 <pre id="segmentContentPre">Select a turn segment to inspect content.</pre>
               </section>
             </div>
@@ -211,15 +224,33 @@
     </main>
     <div id="detailBackdrop" class="detailBackdrop" aria-hidden="true"></div>
     <div id="segmentRawBackdrop" class="segmentRawBackdrop" aria-hidden="true"></div>
-    <section id="segmentRawModal" class="segmentRawModal" aria-live="polite" aria-modal="true" role="dialog">
+    <section id="segmentRawModal" class="segmentRawModal" aria-live="polite" aria-modal="true" role="dialog" aria-labelledby="segmentRawTitle">
       <div class="segmentRawHeader">
         <div>
-          <div class="segmentRawTitle">Full info</div>
+          <div id="segmentRawTitle" class="segmentRawTitle">Event details</div>
           <div id="segmentRawMeta" class="segmentRawMeta">Select a segment.</div>
         </div>
-        <button id="closeSegmentRawBtn" type="button" aria-label="Close segment full info">Close</button>
+        <button id="closeSegmentRawBtn" type="button" aria-label="Close event details">Close</button>
       </div>
-      <pre id="segmentRawPre">Select a turn segment to inspect raw events.</pre>
+      <div class="segmentEventDetails">
+        <aside class="segmentEventSidebar">
+          <div id="segmentEventSummary" class="segmentEventSummary">No events</div>
+          <nav id="segmentEventList" class="segmentEventList" aria-label="Segment events"></nav>
+        </aside>
+        <section class="segmentEventMain">
+          <div class="segmentEventTabs" role="tablist" aria-label="Event detail views">
+            <button id="segmentOriginalTab" class="segmentEventTab active" type="button" role="tab" aria-selected="true" aria-controls="segmentOriginalPanel">Original message</button>
+            <button id="segmentProcessedTab" class="segmentEventTab" type="button" role="tab" aria-selected="false" aria-controls="segmentProcessedPanel">Processed info</button>
+          </div>
+          <div id="segmentOriginalPanel" class="segmentEventPanel active" role="tabpanel" aria-labelledby="segmentOriginalTab">
+            <div id="segmentOriginalStatus" class="segmentOriginalStatus">Select an event.</div>
+            <pre id="segmentOriginalPre">Select an event to inspect the app-server message.</pre>
+          </div>
+          <div id="segmentProcessedPanel" class="segmentEventPanel" role="tabpanel" aria-labelledby="segmentProcessedTab" hidden>
+            <div id="segmentProcessedContent" class="segmentProcessedContent">Select an event to inspect Viewer metadata.</div>
+          </div>
+        </section>
+      </div>
     </section>
 
     <script type="module" src="/app.js"></script>

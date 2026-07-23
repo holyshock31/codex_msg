@@ -1,3 +1,9 @@
+import {
+  buildAggregateRailGroups,
+  buildAggregateGroups,
+  resolveContinuousSegment,
+} from "./conversation-segments.js";
+
 const state = {
   events: [],
   nextViewId: 1,
@@ -7,6 +13,7 @@ const state = {
   selectedThreadId: "",
   selectedTurnId: "",
   selectedSegmentKey: "",
+  selectedAggregateKey: "",
   activeTab: "conversation",
   paused: false,
   status: null,
@@ -40,9 +47,16 @@ const jumpFlashTimers = new WeakMap();
 const threadDetailRequests = new Map();
 const conversationNodeSignatures = new WeakMap();
 const conversationNodeContexts = new WeakMap();
+const exactEventDetailsCache = new Map();
 let conversationResizeObserver = null;
 let conversationObservedAnchor = null;
 let conversationScrollApplyToken = 0;
+let segmentRawSelection = null;
+let segmentRawEventIndex = 0;
+let segmentRawActiveTab = "original";
+let segmentRawLoadToken = 0;
+let segmentContentMode = "original";
+let segmentContentModeKey = "";
 const conversationPerf = {
   modelRequests: 0,
   modelActive: 0,
@@ -105,6 +119,8 @@ const els = {
   conversationMeta: document.querySelector("#conversationMeta"),
   conversationMessages: document.querySelector("#conversationMessages"),
   segmentRail: document.querySelector("#segmentRail"),
+  aggregateRail: document.querySelector("#aggregateRail"),
+  aggregateLinks: document.querySelector("#aggregateLinks"),
   followLatestBtn: document.querySelector("#followLatestBtn"),
   chatShell: document.querySelector(".chatShell"),
   detailSplitter: document.querySelector("#detailSplitter"),
@@ -112,11 +128,23 @@ const els = {
   segmentDetailTitle: document.querySelector("#segmentDetailTitle"),
   segmentDetailMeta: document.querySelector("#segmentDetailMeta"),
   segmentContentPre: document.querySelector("#segmentContentPre"),
+  segmentEncodingControls: document.querySelector("#segmentEncodingControls"),
+  segmentEncodingBadge: document.querySelector("#segmentEncodingBadge"),
+  segmentRecoveredBtn: document.querySelector("#segmentRecoveredBtn"),
+  segmentOriginalBtn: document.querySelector("#segmentOriginalBtn"),
   openSegmentRawBtn: document.querySelector("#openSegmentRawBtn"),
   segmentRawModal: document.querySelector("#segmentRawModal"),
   segmentRawBackdrop: document.querySelector("#segmentRawBackdrop"),
   segmentRawMeta: document.querySelector("#segmentRawMeta"),
-  segmentRawPre: document.querySelector("#segmentRawPre"),
+  segmentEventSummary: document.querySelector("#segmentEventSummary"),
+  segmentEventList: document.querySelector("#segmentEventList"),
+  segmentOriginalTab: document.querySelector("#segmentOriginalTab"),
+  segmentProcessedTab: document.querySelector("#segmentProcessedTab"),
+  segmentOriginalPanel: document.querySelector("#segmentOriginalPanel"),
+  segmentProcessedPanel: document.querySelector("#segmentProcessedPanel"),
+  segmentOriginalStatus: document.querySelector("#segmentOriginalStatus"),
+  segmentOriginalPre: document.querySelector("#segmentOriginalPre"),
+  segmentProcessedContent: document.querySelector("#segmentProcessedContent"),
   closeSegmentRawBtn: document.querySelector("#closeSegmentRawBtn"),
   closeSegmentDetailBtn: document.querySelector("#closeSegmentDetailBtn"),
   eventList: document.querySelector("#eventList"),
@@ -518,6 +546,7 @@ function renderSessionsAndConversation(options = {}) {
     state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
+    state.selectedAggregateKey = "";
     state.conversationViewSignature = "";
   }
   if (state.expandedSessionId && !model.sessions.some((session) => session.id === state.expandedSessionId)) {
@@ -737,6 +766,7 @@ function createSessionListItem(session, signature) {
       state.selectedThreadId = "";
       state.selectedTurnId = "";
       state.selectedSegmentKey = "";
+      state.selectedAggregateKey = "";
       state.conversationViewSignature = "";
     }
     render();
@@ -846,6 +876,7 @@ function renderConversation(session, options = {}) {
     els.conversationMeta.textContent = "Select a session to inspect turns.";
     els.conversationMessages.innerHTML = `<div class="emptyState">No conversation events in the current filters.</div>`;
     renderSegmentRail(null, null);
+    renderAggregateRail(null, null);
     renderSegmentDetail(null);
     return;
   }
@@ -854,6 +885,7 @@ function renderConversation(session, options = {}) {
   if (state.selectedTurnId && !findTurnInSession(session, state.selectedThreadId, state.selectedTurnId)) {
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
+    state.selectedAggregateKey = "";
   }
 
   const activeThread = selectedThread || ensureSelectedThread(session);
@@ -876,6 +908,7 @@ function renderConversation(session, options = {}) {
   if (activeThread?.detailLoaded === false) {
     els.conversationMessages.innerHTML = `<div class="emptyState">Loading thread...</div>`;
     renderSegmentRail(null, null);
+    renderAggregateRail(null, null);
     renderSegmentDetail(null);
     return;
   }
@@ -887,6 +920,7 @@ function renderConversation(session, options = {}) {
     fragment.appendChild(threadDivider(threadModel));
     for (const { turn, number } of numberedTurnsForDisplay(threadModel)) {
       if (!defaultRailTurn) defaultRailTurn = { thread: threadModel, turn };
+      buildAggregateGroups(turn.blocks || []);
       const blocks = blocksWithDisplayNumbers(turn);
       const timingByBlock = blockTimingMap(turn);
       if (state.turnSortDescending) {
@@ -916,8 +950,11 @@ function renderConversation(session, options = {}) {
   } else {
     reconcileConversationMessages(fragment);
   }
-  renderSegmentRail(activeThread, currentRailTurn(activeThread, defaultRailTurn));
+  const railTurn = currentRailTurn(activeThread, defaultRailTurn);
+  renderSegmentRail(activeThread, railTurn);
+  renderAggregateRail(activeThread, railTurn);
   renderSegmentDetail(findSelectedSegment(session));
+  requestAnimationFrame(drawAggregateLinks);
   if (options.scrollPlan) {
     applyConversationScrollPlan(options.scrollPlan, { autoUpdate: Boolean(options.autoUpdate) });
   } else {
@@ -973,7 +1010,9 @@ function turnLifecycleDivider(threadModel, turn, number, phase) {
     state.selectedThreadId = context.threadModel.id;
     state.selectedTurnId = context.turn.id;
     state.selectedSegmentKey = "";
+    state.selectedAggregateKey = "";
     renderSegmentRail(context.threadModel, { thread: context.threadModel, turn: context.turn });
+    renderAggregateRail(context.threadModel, { thread: context.threadModel, turn: context.turn });
     renderSegmentsActiveState();
     renderSegmentDetail(null);
     scrollToTurnLifecycle(context.threadModel.id, context.turn.id, context.phase === "start" ? "end" : "start", "center");
@@ -1402,6 +1441,7 @@ function renderSegmentRail(activeThread, railTurn) {
     button.dataset.threadId = railTurn.thread.id;
     button.dataset.turnId = railTurn.turn.id;
     button.dataset.segmentKey = block.key;
+    button.dataset.aggregateKey = block.aggregateKey || block.key;
     button.title = [
       `${number}. ${block.label || block.kind || "segment"} / ${block.meta || ""}`,
       timing.startMs ? `Started: ${clockTime(timing.startMs)}` : "",
@@ -1413,17 +1453,243 @@ function renderSegmentRail(activeThread, railTurn) {
       <span class="segmentRailKind">${escapeHtml(segmentRailLabel(block))}</span>
     `;
     button.addEventListener("click", () => {
-      state.selectedThreadId = railTurn.thread.id;
-      state.selectedTurnId = railTurn.turn.id;
-      state.selectedSegmentKey = block.key;
-      renderSegmentsActiveState();
-      renderSegmentDetail({ block, thread: railTurn.thread, turn: railTurn.turn });
+      selectSegment(block, railTurn.thread, railTurn.turn);
       jumpToConversationElement(document.querySelector(segmentDomSelector(railTurn.thread.id, railTurn.turn.id, block.key)), "center");
     });
     fragment.appendChild(button);
   });
   els.segmentRail.appendChild(fragment);
   els.segmentRail.classList.add("open");
+}
+
+function renderAggregateRail(activeThread, railTurn) {
+  els.aggregateRail.innerHTML = "";
+  if (!activeThread || !railTurn?.turn) {
+    state.selectedAggregateKey = "";
+    els.aggregateRail.classList.remove("open");
+    drawAggregateLinks();
+    return;
+  }
+
+  const aggregates = buildAggregateRailGroups(railTurn.turn.blocks || []).filter(
+    (group) => aggregateRailItemCount(group.key) > 1,
+  );
+  if (!aggregates.length) {
+    state.selectedAggregateKey = "";
+    els.aggregateRail.classList.remove("open");
+    drawAggregateLinks();
+    return;
+  }
+
+  if (!aggregates.some((group) => group.key === state.selectedAggregateKey)) {
+    state.selectedAggregateKey = "";
+  }
+
+  const heading = document.createElement("div");
+  heading.className = "aggregateRailHeader";
+  heading.innerHTML = `<strong>Aggregate</strong><span>${aggregates.length}</span>`;
+  els.aggregateRail.appendChild(heading);
+
+  const list = document.createElement("div");
+  list.className = "aggregateRailList";
+  for (const group of aggregates) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `aggregateCard kind-${cssSafeId(group.kind || "item")}`;
+    if (group.key === state.selectedAggregateKey) button.classList.add("active");
+    button.dataset.aggregateKey = group.key;
+    button.dataset.aggregateKind = group.kind || "item";
+    const itemNumbers = group.segments.map((segment) => (railTurn.turn.blocks || []).indexOf(segment) + 1);
+    const visibleItemNumbers = itemNumbers.slice(0, 3).map((number) => `#${number}`).join(" · ");
+    const itemSummary = itemNumbers.length > 3 ? `${visibleItemNumbers} +${itemNumbers.length - 3}` : visibleItemNumbers;
+    button.title = `${group.label || group.kind || "aggregate"}\nItems ${itemNumbers.map((number) => `#${number}`).join(", ")}`;
+    button.innerHTML = `
+      <span class="aggregateCardTop">
+        <strong>${escapeHtml(group.label || group.kind || "aggregate")}</strong>
+        <span>${group.segments.length}</span>
+      </span>
+      <span class="aggregateCardItems">${escapeHtml(itemSummary)}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.selectedAggregateKey = group.key;
+      renderAggregateActiveState();
+      drawAggregateLinks();
+    });
+    list.appendChild(button);
+  }
+  els.aggregateRail.appendChild(list);
+  els.aggregateRail.classList.add("open");
+  renderAggregateActiveState();
+}
+
+function planStepState(status) {
+  const value = String(status || "pending").toLowerCase();
+  if (value.includes("complete")) return "completed";
+  if (value.includes("progress") || value.includes("active")) return "active";
+  if (value.includes("fail") || value.includes("error")) return "failed";
+  return "pending";
+}
+
+function planStepStateLabel(state) {
+  if (state === "completed") return "done";
+  if (state === "active") return "doing";
+  if (state === "failed") return "failed";
+  return "todo";
+}
+
+function renderAggregateActiveState() {
+  for (const card of document.querySelectorAll(".aggregateCard.active")) card.classList.remove("active");
+  for (const item of document.querySelectorAll(".segmentRailItem.aggregateRelated")) item.classList.remove("aggregateRelated");
+  if (!state.selectedAggregateKey) return;
+  els.aggregateRail
+    .querySelector(`.aggregateCard[data-aggregate-key="${cssEscape(state.selectedAggregateKey)}"]`)
+    ?.classList.add("active");
+  for (const item of els.segmentRail.querySelectorAll(
+    `.segmentRailItem[data-aggregate-key="${cssEscape(state.selectedAggregateKey)}"]`,
+  )) {
+    item.classList.add("aggregateRelated");
+  }
+}
+
+function aggregateRailItemCount(aggregateKey) {
+  if (!aggregateKey) return 0;
+  return els.segmentRail.querySelectorAll(
+    `.segmentRailItem[data-aggregate-key="${cssEscape(aggregateKey)}"]`,
+  ).length;
+}
+
+function drawAggregateLinks() {
+  const svg = els.aggregateLinks;
+  svg.replaceChildren();
+  const frameRect = els.conversationMessages.parentElement.getBoundingClientRect();
+  const width = Math.max(1, Math.round(frameRect.width));
+  const height = Math.max(1, Math.round(frameRect.height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+
+  drawSelectedItemLink(svg, frameRect);
+  drawSelectedAggregateLinks(svg, frameRect);
+}
+
+function drawSelectedItemLink(svg, frameRect) {
+  if (!state.selectedSegmentKey) return;
+  const railItem = els.segmentRail.querySelector(
+    `.segmentRailItem[data-thread-id="${cssEscape(state.selectedThreadId)}"][data-turn-id="${cssEscape(state.selectedTurnId)}"][data-segment-key="${cssEscape(state.selectedSegmentKey)}"]`,
+  );
+  const segment = document.querySelector(segmentDomSelector(state.selectedThreadId, state.selectedTurnId, state.selectedSegmentKey));
+  if (!railItem || !segment) return;
+
+  const railViewport = els.segmentRail.getBoundingClientRect();
+  const messageViewport = els.conversationMessages.getBoundingClientRect();
+  const railRect = railItem.getBoundingClientRect();
+  const segmentRect = segment.getBoundingClientRect();
+  if (!rectVerticallyVisible(railRect, railViewport)) return;
+
+  const start = relativePoint(frameRect, railRect.right, railRect.top + railRect.height / 2);
+  if (!rectVerticallyVisible(segmentRect, messageViewport)) {
+    const direction = segmentRect.bottom < messageViewport.top ? -1 : 1;
+    appendConnector(svg, start, { x: start.x + 28, y: start.y + direction * 18 }, "itemLink offscreen");
+    return;
+  }
+  const end = relativePoint(frameRect, segmentRect.left, segmentRect.top + segmentRect.height / 2);
+  appendConnector(svg, start, end, "itemLink", true);
+}
+
+function drawSelectedAggregateLinks(svg, frameRect) {
+  if (!state.selectedAggregateKey || !els.aggregateRail.classList.contains("open")) return;
+  const aggregate = els.aggregateRail.querySelector(
+    `.aggregateCard[data-aggregate-key="${cssEscape(state.selectedAggregateKey)}"]`,
+  );
+  if (!aggregate) return;
+
+  const aggregateRect = aggregate.getBoundingClientRect();
+  const railViewport = els.segmentRail.getBoundingClientRect();
+  const start = relativePoint(frameRect, aggregateRect.right, aggregateRect.top + aggregateRect.height / 2);
+  const railItems = els.segmentRail.querySelectorAll(
+    `.segmentRailItem[data-aggregate-key="${cssEscape(state.selectedAggregateKey)}"]`,
+  );
+  const offscreenAbove = [];
+  const offscreenBelow = [];
+  for (const item of railItems) {
+    const rect = item.getBoundingClientRect();
+    if (rect.bottom < railViewport.top) {
+      offscreenAbove.push({ item, rect });
+      continue;
+    }
+    if (rect.top > railViewport.bottom) {
+      offscreenBelow.push({ item, rect });
+      continue;
+    }
+    const end = relativePoint(frameRect, rect.left, rect.top + rect.height / 2);
+    appendConnector(svg, start, end, `aggregateLink kind-${cssSafeId(aggregate.dataset.aggregateKind || "item")}`, true);
+  }
+  drawOffscreenAggregateLinks(svg, start, frameRect, railViewport, offscreenAbove, -1);
+  drawOffscreenAggregateLinks(svg, start, frameRect, railViewport, offscreenBelow, 1);
+}
+
+function drawOffscreenAggregateLinks(svg, start, frameRect, railViewport, entries, direction) {
+  if (!entries.length) return;
+  const railEdgeX = railViewport.left - frameRect.left - 22;
+  const end = {
+    x: Math.min(railEdgeX, start.x + 68),
+    y: Math.max(14, Math.min(frameRect.height - 14, start.y + direction * 52)),
+  };
+  const path = appendConnector(
+    svg,
+    start,
+    end,
+    `aggregateLink offscreen offscreen-${direction < 0 ? "above" : "below"}`,
+  );
+  path.dataset.offscreenDirection = direction < 0 ? "above" : "below";
+  path.dataset.offscreenCount = String(entries.length);
+  appendOffscreenCount(svg, end, entries.length, direction);
+}
+
+function appendOffscreenCount(svg, point, count, direction) {
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("class", "aggregateLinkCount");
+  group.setAttribute("transform", `translate(${point.x + 12} ${point.y})`);
+  const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+  title.textContent = `${count} related items ${direction < 0 ? "above" : "below"} the visible rail`;
+  group.appendChild(title);
+  const badge = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  badge.setAttribute("r", "10");
+  badge.setAttribute("class", "aggregateLinkCountBadge");
+  group.appendChild(badge);
+  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  text.setAttribute("class", "aggregateLinkCountText");
+  text.setAttribute("text-anchor", "middle");
+  text.setAttribute("dominant-baseline", "central");
+  text.textContent = String(count);
+  group.appendChild(text);
+  svg.appendChild(group);
+}
+
+function appendConnector(svg, start, end, className, showEndDot = false) {
+  const bendX = start.x + (end.x - start.x) * 0.5;
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", `M ${start.x} ${start.y} C ${bendX} ${start.y}, ${bendX} ${end.y}, ${end.x} ${end.y}`);
+  path.setAttribute("class", className);
+  svg.appendChild(path);
+  if (!showEndDot) return path;
+  for (const point of [start, end]) {
+    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    dot.setAttribute("cx", String(point.x));
+    dot.setAttribute("cy", String(point.y));
+    dot.setAttribute("r", "3");
+    dot.setAttribute("class", "aggregateLinkDot");
+    svg.appendChild(dot);
+  }
+  return path;
+}
+
+function relativePoint(frameRect, x, y) {
+  return { x: x - frameRect.left, y: y - frameRect.top };
+}
+
+function rectVerticallyVisible(rect, viewport) {
+  return rect.bottom >= viewport.top && rect.top <= viewport.bottom;
 }
 
 function segmentRailLabel(block) {
@@ -1440,6 +1706,7 @@ function selectThread(threadId) {
   state.selectedThreadId = threadId;
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
+  state.selectedAggregateKey = "";
   state.conversationViewSignature = "";
   render();
 }
@@ -1458,10 +1725,12 @@ function selectTurn(threadId, turnId) {
   state.selectedThreadId = threadId;
   state.selectedTurnId = turnId;
   state.selectedSegmentKey = "";
+  state.selectedAggregateKey = "";
   const session = state.conversationModel?.sessions?.find((candidate) => candidate.id === state.selectedSessionId);
   const match = findThreadTurnInSession(session, threadId, turnId);
   if (match && turnLifecycleElement(threadId, turnId)) {
     renderSegmentRail(match.thread, { thread: match.thread, turn: match.turn });
+    renderAggregateRail(match.thread, { thread: match.thread, turn: match.turn });
     renderSegmentsActiveState();
     renderSegmentDetail(null);
     scrollToTurnLifecycle(threadId, turnId);
@@ -1499,6 +1768,7 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
   article.dataset.threadId = threadModel.id;
   article.dataset.turnId = turn.id;
   article.dataset.segmentKey = block.key;
+  article.dataset.aggregateKey = block.aggregateKey || block.key;
   article.dataset.segmentNumber = number;
   const startText = timing.startMs ? clockTime(timing.startMs) : eventTime(block.events[0] || {});
   const gapText = compactGapLabel(timing.gapMs);
@@ -1515,6 +1785,7 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
     return registerConversationNode(article, `segment:${threadModel.id}:${turn.id}:${block.key}`, conversationNodeContexts.get(article));
   }
   const preview = segmentPreview(block);
+  const contentMarkup = block.kind === "plan" ? planSegmentMarkup(block) : `<div class="segmentPreview">${escapeHtml(preview)}</div>`;
   article.innerHTML = `
     <div class="messageMeta">
       <span class="segmentNumberBadge">${escapeHtml(String(number))}</span>
@@ -1522,9 +1793,10 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
       <span>${escapeHtml(block.meta)}</span>
       <span class="segmentStartTime">${escapeHtml(startText)}</span>
       ${gapText ? `<span class="segmentGap" title="Gap from previous item: ${escapeHtml(durationLabel(timing.gapMs))}">${escapeHtml(gapText)}</span>` : ""}
+      ${block.aggregateParts > 1 ? `<span class="aggregatePartBadge">part ${block.aggregatePart}/${block.aggregateParts}</span>` : ""}
       <span>${block.events.length} events</span>
     </div>
-    <div class="segmentPreview">${escapeHtml(preview)}</div>
+    ${contentMarkup}
   `;
   conversationNodeContexts.set(article, { block, threadModel, turn });
   article.addEventListener("click", () => selectConversationSegmentElement(article));
@@ -1535,6 +1807,40 @@ function segmentCard(block, threadModel, turn, number = "", timing = {}) {
     }
   });
   return registerConversationNode(article, `segment:${threadModel.id}:${turn.id}:${block.key}`, conversationNodeContexts.get(article));
+}
+
+function planSegmentMarkup(block) {
+  const plan = Array.isArray(block.plan) ? block.plan : [];
+  if (!plan.length) return `<div class="segmentPreview">${escapeHtml(segmentPreview(block))}</div>`;
+  const steps = plan.map((item) => ({
+    state: planStepState(item.status),
+    step: String(item.step || "Plan step"),
+  }));
+  const completed = steps.filter((item) => item.state === "completed").length;
+  const progress = Math.round((completed / steps.length) * 100);
+  return `
+    <div class="planContent">
+      <div class="planContentSummary">
+        <span><strong>${completed}/${steps.length}</strong> completed</span>
+        <span>${steps.length} steps</span>
+      </div>
+      <div class="planProgressTrack" role="progressbar" aria-label="Plan progress" aria-valuemin="0" aria-valuemax="${steps.length}" aria-valuenow="${completed}">
+        <span class="planProgressFill" style="width: ${progress}%"></span>
+      </div>
+      <ol class="planStepList">
+        ${steps
+          .map(
+            (item) => `
+              <li class="planStepItem status-${item.state}">
+                <span class="planStepStatus">${escapeHtml(planStepStateLabel(item.state))}</span>
+                <span class="planStepText">${escapeHtml(item.step)}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ol>
+    </div>
+  `;
 }
 
 function selectConversationSegmentElement(element) {
@@ -1675,8 +1981,14 @@ function selectSegment(block, threadModel, turn) {
   state.selectedThreadId = threadModel.id;
   state.selectedTurnId = turn.id;
   state.selectedSegmentKey = block.key;
+  const aggregateKey = block.aggregateKey || block.key;
+  state.selectedAggregateKey = buildAggregateRailGroups(turn.blocks || []).some((group) => group.key === aggregateKey)
+    ? aggregateKey
+    : "";
   renderSegmentsActiveState();
+  renderAggregateActiveState();
   renderSegmentDetail({ block, thread: threadModel, turn });
+  drawAggregateLinks();
 }
 
 function renderSegmentsActiveState() {
@@ -1725,6 +2037,7 @@ function findSelectedSegment(session) {
     }
   }
   state.selectedSegmentKey = "";
+  state.selectedAggregateKey = "";
   return null;
 }
 
@@ -1735,41 +2048,317 @@ function renderSegmentDetail(selection) {
     els.segmentDetailTitle.textContent = "Segment detail";
     els.segmentDetailMeta.textContent = "Select a segment.";
     els.segmentContentPre.textContent = "Select a turn segment to inspect content.";
+    renderSegmentEncodingControls(null);
     els.segmentRawMeta.textContent = "Select a segment.";
-    els.segmentRawPre.textContent = "Select a turn segment to inspect raw events.";
+    segmentRawSelection = null;
+    segmentContentModeKey = "";
+    segmentContentMode = "original";
+    segmentRawEventIndex = 0;
+    segmentRawLoadToken += 1;
     closeSegmentRaw();
     return;
   }
   const { block, thread, turn } = selection;
-  const body = isContextCompactionBlock(block) ? contextCompactionDetailText(block) : blockText(block) || "(empty)";
+  const outputEncoding = validOutputEncoding(block.outputEncoding);
+  if (segmentContentModeKey !== block.key) {
+    segmentContentModeKey = block.key;
+    segmentContentMode = outputEncoding?.defaultDisplay === "recovered" ? "recovered" : "original";
+  }
+  if (!outputEncoding) segmentContentMode = "original";
+  const commandOutput = segmentContentMode === "recovered" ? outputEncoding?.recoveredText : block.output;
+  const body = isContextCompactionBlock(block)
+    ? contextCompactionDetailText(block)
+    : blockText(block, { commandOutput }) || "(empty)";
   const displayedBody = truncateForDisplay(body);
   const truncated = displayedBody.length !== body.length;
-  const raw = block.events.map((event) => {
-    const { viewId: _viewId, ...displayEvent } = event;
-    return displayEvent;
-  });
+  const totalEvents = totalBlockEventCount(block);
+  if (segmentRawSelection?.block?.key !== block.key) {
+    segmentRawEventIndex = 0;
+    segmentRawLoadToken += 1;
+  }
+  segmentRawSelection = selection;
   els.segmentDetail.classList.add("open");
   syncSegmentDetailOpen();
   els.segmentDetailTitle.textContent = isContextCompactionBlock(block) ? "Context compacted" : `${block.label} / ${block.meta || block.kind}`;
-  els.segmentDetailMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
-  els.segmentRawMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${block.events.length} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
+  els.segmentDetailMeta.textContent = [`Thread ${shortId(thread.id)}`, `Turn ${shortId(turn.id)}`, `${totalEvents} events`, eventTime(block.events[0] || {})].filter(Boolean).join(" / ");
   els.segmentContentPre.textContent = `${displayedBody}${truncated ? "\n\n[display truncated]" : ""}`;
-  els.segmentRawPre.textContent = JSON.stringify(raw, null, 2);
+  renderSegmentEncodingControls(outputEncoding);
+  if (els.segmentRawModal.classList.contains("open")) renderSegmentEventDetails();
+}
+
+function validOutputEncoding(value) {
+  if (!value || typeof value !== "object" || typeof value.recoveredText !== "string") return null;
+  return value;
+}
+
+function renderSegmentEncodingControls(outputEncoding) {
+  const visible = Boolean(outputEncoding);
+  els.segmentEncodingControls.hidden = !visible;
+  if (!visible) {
+    els.segmentEncodingBadge.textContent = "";
+    els.segmentEncodingBadge.title = "";
+    return;
+  }
+  const percent = Math.round((Number(outputEncoding.confidence) || 0) * 100);
+  const partial = outputEncoding.recovery === "partial";
+  els.segmentEncodingBadge.className = `segmentEncodingBadge ${partial ? "partial" : "exact"}`;
+  els.segmentEncodingBadge.textContent = partial ? `UTF-8 recovered partially · ${percent}%` : `UTF-8 recovered · ${percent}%`;
+  els.segmentEncodingBadge.title = (outputEncoding.evidence || []).join("\n");
+  const recovered = segmentContentMode === "recovered";
+  els.segmentRecoveredBtn.classList.toggle("active", recovered);
+  els.segmentOriginalBtn.classList.toggle("active", !recovered);
+  els.segmentRecoveredBtn.setAttribute("aria-pressed", String(recovered));
+  els.segmentOriginalBtn.setAttribute("aria-pressed", String(!recovered));
 }
 
 function openSegmentRaw() {
-  if (!state.selectedSegmentKey) return;
+  if (!state.selectedSegmentKey || !segmentRawSelection) return;
   els.segmentRawModal.classList.add("open");
   els.segmentRawBackdrop.classList.add("open");
+  setSegmentRawTab("original");
+  renderSegmentEventDetails();
 }
 
 function closeSegmentRaw() {
   els.segmentRawModal.classList.remove("open");
   els.segmentRawBackdrop.classList.remove("open");
+  segmentRawLoadToken += 1;
+}
+
+function totalBlockEventCount(block) {
+  return Math.max(Number(block?.eventCount) || 0, block?.events?.length || 0);
+}
+
+function renderSegmentEventDetails() {
+  const selection = segmentRawSelection;
+  if (!selection) return;
+  const { block, thread, turn } = selection;
+  const events = block.events || [];
+  const totalEvents = totalBlockEventCount(block);
+  const omittedEvents = Math.max(Number(block.omittedEventCount) || 0, totalEvents - events.length, 0);
+  segmentRawEventIndex = clamp(segmentRawEventIndex, 0, Math.max(0, events.length - 1));
+  els.segmentRawMeta.textContent = [
+    `Thread ${shortId(thread.id)}`,
+    `Turn ${shortId(turn.id)}`,
+    `${totalEvents} events`,
+    events.length !== totalEvents ? `${events.length} sampled` : "",
+  ].filter(Boolean).join(" / ");
+  els.segmentEventSummary.textContent = omittedEvents
+    ? `${events.length} sampled / ${totalEvents} total / ${omittedEvents} omitted`
+    : `${events.length} events`;
+  els.segmentEventList.innerHTML = segmentEventListMarkup(block, events, omittedEvents);
+  for (const button of els.segmentEventList.querySelectorAll(".segmentEventRow")) {
+    button.addEventListener("click", () => selectSegmentRawEvent(Number(button.dataset.eventIndex) || 0));
+  }
+  if (!events.length) {
+    renderSegmentOriginal(null, null, "No sampled events are available for this segment.");
+    renderSegmentProcessed(null, null);
+    return;
+  }
+  selectSegmentRawEvent(segmentRawEventIndex);
+}
+
+function segmentEventListMarkup(block, events, omittedEvents) {
+  const headEvents = Math.max(0, Number(block.rawSample?.headEvents) || 3);
+  return events
+    .map((event, index) => {
+      const omitted = omittedEvents && index === Math.min(headEvents, events.length)
+        ? `<div class="segmentEventOmitted">${omittedEvents} events omitted</div>`
+        : "";
+      return `${omitted}
+        <button class="segmentEventRow${index === segmentRawEventIndex ? " active" : ""}" type="button" data-event-index="${index}">
+          <span class="segmentEventRowTop">
+            <span class="segmentEventRowSeq">#${escapeHtml(String(event.seq ?? "?"))}</span>
+            <span class="segmentEventRowMeta">${escapeHtml(eventTime(event))}</span>
+          </span>
+          <span class="segmentEventRowMethod">${escapeHtml(event.method || "(no method)")}</span>
+          <span class="segmentEventRowMeta"><span>${escapeHtml(event.dir || "unknown")}</span><span>${escapeHtml(event.itemType || "")}</span></span>
+        </button>`;
+    })
+    .join("");
+}
+
+function selectSegmentRawEvent(index) {
+  const block = segmentRawSelection?.block;
+  const events = block?.events || [];
+  if (!events.length) return;
+  segmentRawEventIndex = clamp(index, 0, events.length - 1);
+  for (const button of els.segmentEventList.querySelectorAll(".segmentEventRow")) {
+    button.classList.toggle("active", Number(button.dataset.eventIndex) === segmentRawEventIndex);
+  }
+  const sample = events[segmentRawEventIndex];
+  const cacheKey = exactEventDetailsKey(sample);
+  const exact = cacheKey ? exactEventDetailsCache.get(cacheKey) : null;
+  renderSegmentOriginal(sample, exact);
+  renderSegmentProcessed(sample, exact);
+  if (!exact && cacheKey) void loadExactEventDetails(sample, cacheKey, segmentRawEventIndex);
+}
+
+async function loadExactEventDetails(sample, cacheKey, selectedIndex) {
+  const token = ++segmentRawLoadToken;
+  setSegmentOriginalStatus("loading", `Loading complete message for seq ${sample.seq}...`);
+  try {
+    const params = new URLSearchParams({ seq: String(sample.seq), ts_ms: String(sample.ts_ms || "") });
+    if (sample.sourceId) params.set("sourceId", sample.sourceId);
+    if (sample.connectionId) params.set("connectionId", sample.connectionId);
+    const response = await fetch(`/api/event-details?${params}`);
+    const details = await response.json();
+    if (!response.ok) throw new Error(details.error || `HTTP ${response.status}`);
+    exactEventDetailsCache.set(cacheKey, details);
+    while (exactEventDetailsCache.size > 32) exactEventDetailsCache.delete(exactEventDetailsCache.keys().next().value);
+    if (token !== segmentRawLoadToken || selectedIndex !== segmentRawEventIndex || !els.segmentRawModal.classList.contains("open")) return;
+    renderSegmentOriginal(sample, details);
+    renderSegmentProcessed(sample, details);
+  } catch (error) {
+    if (token !== segmentRawLoadToken || selectedIndex !== segmentRawEventIndex) return;
+    renderSegmentOriginal(sample, null, `Complete message unavailable: ${error.message}. Showing the compact Viewer sample.`);
+    renderSegmentProcessed(sample, null, error.message);
+  }
+}
+
+function exactEventDetailsKey(event) {
+  if (event?.seq == null) return "";
+  return [event.seq, event.ts_ms || "", event.sourceId || "", event.connectionId || ""].join(":");
+}
+
+function renderSegmentOriginal(sample, details, error = "") {
+  if (!sample) {
+    setSegmentOriginalStatus("error", error || "No event selected.");
+    els.segmentOriginalPre.textContent = "";
+    return;
+  }
+  if (details) {
+    const original = details.original || {};
+    const body = original.json != null ? JSON.stringify(original.json, null, 2) : String(original.raw || "");
+    const status = original.parseError
+      ? `Complete captured payload / parse error: ${original.parseError}`
+      : `Complete app-server message / ${details.source || "exact source"}`;
+    setSegmentOriginalStatus(original.parseError ? "error" : "complete", status);
+    els.segmentOriginalPre.textContent = body || "(empty message)";
+    return;
+  }
+  const body = sample.rawJson != null ? JSON.stringify(sample.rawJson, null, 2) : String(sample.raw || "");
+  setSegmentOriginalStatus(error ? "error" : "sampled", error || "Compact Viewer sample while the complete message is loading.");
+  els.segmentOriginalPre.textContent = body || "(empty sample)";
+}
+
+function setSegmentOriginalStatus(kind, text) {
+  els.segmentOriginalStatus.className = `segmentOriginalStatus ${kind}`;
+  els.segmentOriginalStatus.textContent = text;
+}
+
+function renderSegmentProcessed(sample, details, loadError = "") {
+  const selection = segmentRawSelection;
+  if (!selection) return;
+  const { block } = selection;
+  const capture = details?.capture || captureFieldsFromSample(sample);
+  const derived = details?.derived || derivedFieldsFromSample(sample);
+  const totalEvents = totalBlockEventCount(block);
+  const omittedEvents = Math.max(Number(block.omittedEventCount) || 0, totalEvents - (block.events?.length || 0), 0);
+  els.segmentProcessedContent.innerHTML = [
+    processedGroupMarkup("Capture metadata", capture),
+    processedGroupMarkup("Extracted identity", derived),
+    processedGroupMarkup("Viewer segment", {
+      kind: block.kind,
+      role: block.role,
+      label: block.label,
+      meta: block.meta,
+      status: block.status,
+      segmentKey: block.key,
+      aggregateKey: block.aggregateKey || block.key,
+      aggregatePart: block.aggregateParts > 1 ? `${block.aggregatePart} / ${block.aggregateParts}` : null,
+      eventCount: totalEvents,
+      sampledEvents: block.events?.length || 0,
+      omittedEventCount: omittedEvents,
+      firstSeq: block.firstSeq,
+      lastSeq: block.lastSeq,
+      contentTruncated: Boolean(block.contentTruncated),
+    }),
+    processedGroupMarkup("Processing", {
+      originalMessage: details ? "complete" : "compact sample",
+      detailSource: details?.source || "conversation model",
+      rawParse: derived.rawParseError || derived.parseError || "success",
+      loadError: loadError || null,
+    }),
+    block.outputEncoding
+      ? processedGroupMarkup("Encoding recovery", {
+          pattern: block.outputEncoding.pattern,
+          sourceEncoding: block.outputEncoding.sourceEncoding,
+          targetEncoding: block.outputEncoding.targetEncoding,
+          confidence: block.outputEncoding.confidence,
+          recovery: block.outputEncoding.recovery,
+          defaultDisplay: block.outputEncoding.defaultDisplay,
+          aggregateConfidence: block.outputEncoding.aggregateConfidence,
+          aggregateRecovery: block.outputEncoding.aggregateRecovery,
+          repairedLines: block.outputEncoding.repairedLines,
+          repairedChars: block.outputEncoding.repairedChars,
+          replacementCount: block.outputEncoding.replacementCount,
+          evidence: block.outputEncoding.evidence,
+        })
+      : "",
+  ].join("");
+}
+
+function captureFieldsFromSample(event = {}) {
+  return {
+    schema: event.schema,
+    seq: event.seq,
+    ts_ms: event.ts_ms,
+    pid: event.pid,
+    dir: event.dir,
+    source: event.source,
+    sourceId: event.sourceId,
+    transport: event.transport,
+    connectionId: event.connectionId,
+    codec: event.codec,
+  };
+}
+
+function derivedFieldsFromSample(event = {}) {
+  return {
+    method: event.method,
+    requestId: event.requestId,
+    sessionId: event.sessionId,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    itemId: event.itemId,
+    itemType: event.itemType,
+    summary: event.summary,
+    parseError: event.parseError,
+    rawParseError: event.rawParseError,
+  };
+}
+
+function processedGroupMarkup(title, values) {
+  const rows = Object.entries(values || {})
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(formatProcessedValue(value))}</dd>`)
+    .join("");
+  return `<section class="processedGroup"><div class="processedGroupTitle">${escapeHtml(title)}</div><dl class="processedGrid">${rows}</dl></section>`;
+}
+
+function formatProcessedValue(value) {
+  if (value === null || value === "") return "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function setSegmentRawTab(tab) {
+  segmentRawActiveTab = tab === "processed" ? "processed" : "original";
+  const original = segmentRawActiveTab === "original";
+  els.segmentOriginalTab.classList.toggle("active", original);
+  els.segmentProcessedTab.classList.toggle("active", !original);
+  els.segmentOriginalTab.setAttribute("aria-selected", String(original));
+  els.segmentProcessedTab.setAttribute("aria-selected", String(!original));
+  els.segmentOriginalPanel.classList.toggle("active", original);
+  els.segmentProcessedPanel.classList.toggle("active", !original);
+  els.segmentOriginalPanel.hidden = !original;
+  els.segmentProcessedPanel.hidden = original;
 }
 
 function syncSegmentDetailOpen() {
   els.chatShell.classList.toggle("detailOpen", els.segmentDetail.classList.contains("open"));
+  requestAnimationFrame(drawAggregateLinks);
 }
 
 function clamp(value, min, max) {
@@ -1786,13 +2375,14 @@ function setSessionPaneWidth(width, bounds = sessionPaneWidthBounds()) {
   return next;
 }
 
-function segmentDetailHeightBounds(rect = els.chatShell.getBoundingClientRect()) {
-  return { min: 180, max: Math.max(180, rect.height - 180) };
+function segmentDetailWidthBounds(rect = els.chatShell.getBoundingClientRect()) {
+  return { min: 340, max: Math.max(340, rect.width - 560) };
 }
 
-function setSegmentDetailHeight(height, bounds = segmentDetailHeightBounds()) {
-  const next = clamp(height, bounds.min, bounds.max);
-  document.documentElement.style.setProperty("--segment-detail-height", `${Math.round(next)}px`);
+function setSegmentDetailWidth(width, bounds = segmentDetailWidthBounds()) {
+  const next = clamp(width, bounds.min, bounds.max);
+  document.documentElement.style.setProperty("--segment-detail-width", `${Math.round(next)}px`);
+  requestAnimationFrame(drawAggregateLinks);
   return next;
 }
 
@@ -1820,24 +2410,30 @@ function initSplitters() {
   });
 
   initPointerResize(els.detailSplitter, {
-    axis: "y",
-    bodyClass: "resizingHorizontal",
+    axis: "x",
+    bodyClass: "resizingVertical",
     createDrag: () => {
       const shellRect = els.chatShell.getBoundingClientRect();
       const handleRect = els.detailSplitter.getBoundingClientRect();
-      const bounds = segmentDetailHeightBounds(shellRect);
-      const cssHeight = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--segment-detail-height"));
-      const initialValue = clamp(Number.isFinite(cssHeight) ? cssHeight : shellRect.bottom - handleRect.bottom, bounds.min, bounds.max);
+      if (!handleRect.width) return null;
+      const widthBounds = segmentDetailWidthBounds(shellRect);
+      const cssWidth = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--segment-detail-width"));
+      const initialWidth = clamp(Number.isFinite(cssWidth) ? cssWidth : shellRect.right - handleRect.right, widthBounds.min, widthBounds.max);
+      const positionBounds = {
+        min: shellRect.width - handleRect.width - widthBounds.max,
+        max: shellRect.width - handleRect.width - widthBounds.min,
+      };
+      const initialValue = clamp(shellRect.width - handleRect.width - initialWidth, positionBounds.min, positionBounds.max);
       return {
         initialValue,
         ghostRect: {
-          height: handleRect.height || 6,
-          left: shellRect.left,
-          top: shellRect.bottom - initialValue - (handleRect.height || 6),
-          width: shellRect.width,
+          height: shellRect.height,
+          left: shellRect.left + initialValue,
+          top: shellRect.top,
+          width: handleRect.width || 6,
         },
-        valueFromEvent: (event) => clamp(shellRect.bottom - event.clientY, bounds.min, bounds.max),
-        commit: (value) => setSegmentDetailHeight(value, bounds),
+        valueFromEvent: (event) => clamp(event.clientX - shellRect.left, positionBounds.min, positionBounds.max),
+        commit: (value) => setSegmentDetailWidth(shellRect.width - handleRect.width - value, widthBounds),
       };
     },
   });
@@ -1951,6 +2547,7 @@ function ensureSelectedThread(session) {
     state.selectedThreadId = "";
     state.selectedTurnId = "";
     state.selectedSegmentKey = "";
+    state.selectedAggregateKey = "";
     return null;
   }
   const selected = state.selectedThreadId ? threads.find((thread) => thread.id === state.selectedThreadId) : null;
@@ -1958,6 +2555,7 @@ function ensureSelectedThread(session) {
   state.selectedThreadId = threads[0].id;
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
+  state.selectedAggregateKey = "";
   return threads[0];
 }
 
@@ -2023,7 +2621,7 @@ function appendBlockValue(existing, addition) {
   return boundedBlockValue(`${existing || ""}${addition || ""}`);
 }
 
-function blockText(block) {
+function blockText(block, options = {}) {
   if (block.kind === "command") {
     const parts = [];
     if (block.command) parts.push(`$ ${block.command}`);
@@ -2031,7 +2629,8 @@ function blockText(block) {
     if (block.status || block.exitCode != null || block.durationMs != null) {
       parts.push(`status: ${[block.status, block.exitCode != null ? `exit=${block.exitCode}` : "", durationLabel(block.durationMs)].filter(Boolean).join(" / ")}`);
     }
-    if (block.output) parts.push(block.output);
+    const output = options.commandOutput ?? block.output;
+    if (output) parts.push(output);
     return parts.join("\n\n");
   }
   if (block.kind === "tool") {
@@ -2787,22 +3386,27 @@ function extractConversationEvent(event) {
 }
 
 function applyBlock(turn, update, event) {
-  const key = update.key || `${update.kind}:${event.viewId}`;
-  let block = turn.blocksByKey.get(key);
-  if (!block) {
+  const resolution = resolveContinuousSegment(turn, update, event);
+  let block = resolution.block;
+  if (resolution.isNew) {
     block = {
       ...update,
-      key,
+      key: resolution.segmentKey,
+      aggregateKey: resolution.aggregateKey,
       events: [],
       firstSeq: event.seq ?? event.viewId,
+      lastSeq: event.seq ?? event.viewId,
       firstTs: event.ts_ms || 0,
+      lastTs: event.ts_ms || 0,
       text: "",
       output: "",
     };
-    turn.blocksByKey.set(key, block);
+    turn.blocksByKey.set(block.key, block);
     turn.blocks.push(block);
   }
   block.events.push(event);
+  block.lastSeq = event.seq ?? event.viewId ?? block.lastSeq;
+  block.lastTs = event.ts_ms || block.lastTs;
   block.meta = update.meta || block.meta;
   block.status = update.status ?? block.status;
   block.exitCode = update.exitCode ?? block.exitCode;
@@ -3260,7 +3864,11 @@ for (const el of [els.dirFilter, els.methodFilter, els.threadFilter, els.textFil
 els.conversationMessages.addEventListener("scroll", () => {
   if (state.conversationScrollApplying) return;
   updateConversationFollowState();
+  drawAggregateLinks();
 });
+els.aggregateRail.addEventListener("scroll", drawAggregateLinks);
+els.segmentRail.addEventListener("scroll", drawAggregateLinks);
+window.addEventListener("resize", drawAggregateLinks);
 
 els.followLatestBtn?.addEventListener("click", () => {
   const token = beginConversationScrollApplication();
@@ -3310,6 +3918,7 @@ els.clearBtn.addEventListener("click", () => {
   state.selectedThreadId = "";
   state.selectedTurnId = "";
   state.selectedSegmentKey = "";
+  state.selectedAggregateKey = "";
   state.conversationViewSignature = "";
   closeDetail();
 });
@@ -3337,6 +3946,7 @@ for (const table of [els.tokenThreadsTable, els.tokenTurnsTable]) {
     state.selectedThreadId = match.thread.id;
     state.selectedTurnId = turnId;
     state.selectedSegmentKey = "";
+    state.selectedAggregateKey = "";
     state.conversationViewSignature = "";
     render();
     requestAnimationFrame(() => {
@@ -3359,9 +3969,21 @@ els.closeSegmentDetailBtn.addEventListener("click", () => {
   renderSegmentsActiveState();
   renderSegmentDetail(null);
 });
+els.segmentRecoveredBtn.addEventListener("click", () => {
+  if (!segmentRawSelection?.block?.outputEncoding) return;
+  segmentContentMode = "recovered";
+  renderSegmentDetail(segmentRawSelection);
+});
+els.segmentOriginalBtn.addEventListener("click", () => {
+  if (!segmentRawSelection) return;
+  segmentContentMode = "original";
+  renderSegmentDetail(segmentRawSelection);
+});
 els.openSegmentRawBtn.addEventListener("click", openSegmentRaw);
 els.closeSegmentRawBtn.addEventListener("click", closeSegmentRaw);
 els.segmentRawBackdrop.addEventListener("click", closeSegmentRaw);
+els.segmentOriginalTab.addEventListener("click", () => setSegmentRawTab("original"));
+els.segmentProcessedTab.addEventListener("click", () => setSegmentRawTab("processed"));
 els.closeTurnOverlayBtn.addEventListener("click", closeTurnOverlay);
 els.detailBackdrop.addEventListener("click", closeDetail);
 window.addEventListener("keydown", (event) => {

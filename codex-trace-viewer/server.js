@@ -5,6 +5,8 @@ import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { resolveContinuousSegment } from "./public/conversation-segments.js";
+import { applyCommandOutputEncodings, diagnoseTextEncoding } from "./text-encoding.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +47,7 @@ const STORAGE_PRELOAD_EVENTS = Number(process.env.CODEX_TRACE_STORAGE_PRELOAD_EV
 const STORAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_STORAGE_SCAN_CACHE_MS || "5000");
 const TOKEN_USAGE_SCAN_CACHE_MS = Number(process.env.CODEX_TRACE_TOKEN_USAGE_SCAN_CACHE_MS || "30000");
 const TOKEN_USAGE_TOP_LIMIT = Number(process.env.CODEX_TRACE_TOKEN_USAGE_TOP_LIMIT || "50");
+const EXACT_EVENT_CACHE_SIZE = Number(process.env.CODEX_TRACE_EXACT_EVENT_CACHE_SIZE || "64");
 const TEMPORARY_SESSION_ID = "__codex_trace_temporary_sessions__";
 const TEMPORARY_SESSION_TITLE = "临时会话";
 
@@ -53,6 +56,7 @@ const clients = new Set();
 const ring = [];
 const threadMetadata = new Map();
 const conversationSessions = new Map();
+const exactEventCache = new Map();
 let lastOffset = 0;
 let lastSeq = 0;
 let readBuffer = "";
@@ -777,6 +781,7 @@ function extractConversationEvent(event) {
     };
   }
   if (item.type === "commandExecution") {
+    const output = item.aggregatedOutput || "";
     return {
       turnId,
       block: {
@@ -790,7 +795,8 @@ function extractConversationEvent(event) {
         status: item.status,
         exitCode: item.exitCode,
         durationMs: item.durationMs,
-        output: item.aggregatedOutput || "",
+        output,
+        outputEncoding: diagnoseTextEncoding(output, { command: item.command }),
         preview: item.command || "command",
       },
     };
@@ -888,12 +894,13 @@ function extractConversationEvent(event) {
 }
 
 function applyConversationBlock(turn, update, event) {
-  const key = update.key || `${update.kind}:${event.seq ?? event.ts_ms ?? turn.blocks.length}`;
-  let block = turn.blocksByKey.get(key);
-  if (!block) {
+  const resolution = resolveContinuousSegment(turn, update, event);
+  let block = resolution.block;
+  if (resolution.isNew) {
     block = {
       ...update,
-      key,
+      key: resolution.segmentKey,
+      aggregateKey: resolution.aggregateKey,
       events: [],
       eventCount: 0,
       omittedEventCount: 0,
@@ -905,7 +912,7 @@ function applyConversationBlock(turn, update, event) {
       output: "",
       contentTruncated: false,
     };
-    turn.blocksByKey.set(key, block);
+    turn.blocksByKey.set(block.key, block);
     turn.blocks.push(block);
   }
   addRawEventSample(block, event);
@@ -928,6 +935,12 @@ function applyConversationBlock(turn, update, event) {
     block.output = boundedSegmentValue(block, `${block.output || ""}${update.output || ""}`);
   } else if (update.output != null && update.output !== "") {
     block.output = boundedSegmentValue(block, update.output);
+  }
+  if (update.outputEncoding) {
+    block.outputEncoding = {
+      ...update.outputEncoding,
+      recoveredText: boundedSegmentValue(block, update.outputEncoding.recoveredText),
+    };
   }
   if (update.preview) block.preview = update.preview;
 }
@@ -1223,6 +1236,7 @@ function serializeConversationThreadSummary(thread) {
 }
 
 function serializeConversationTurn(turn) {
+  applyCommandOutputEncodings(turn.blocks);
   const blocks = turn.blocks.map(serializeConversationBlock).sort((a, b) => (a.firstSeq || 0) - (b.firstSeq || 0));
   return {
     id: turn.id,
@@ -1637,6 +1651,100 @@ async function listStorageSegmentFiles() {
     if (error.code === "ENOENT") return [];
     throw error;
   }
+}
+
+async function findExactEvent(query) {
+  const key = exactEventKey(query);
+  if (exactEventCache.has(key)) {
+    const cached = exactEventCache.get(key);
+    exactEventCache.delete(key);
+    exactEventCache.set(key, cached);
+    return cached;
+  }
+
+  for (let index = ring.length - 1; index >= 0; index -= 1) {
+    if (eventMatchesExactQuery(ring[index], query)) return cacheExactEvent(key, { event: ring[index], source: "memory" });
+  }
+
+  for (let index = storageState.pending.length - 1; index >= 0; index -= 1) {
+    const event = parseStoredEventLine(storageState.pending[index]?.line, query);
+    if (event) return cacheExactEvent(key, { event, source: "pending-storage" });
+  }
+
+  if (!STORAGE_ENABLED) return null;
+  const files = await listStorageSegmentFiles();
+  for (const file of files.reverse()) {
+    for await (const line of readStorageSegmentLines(file.path)) {
+      const event = parseStoredEventLine(line, query);
+      if (event) return cacheExactEvent(key, { event, source: `review-store/${file.name}` });
+    }
+  }
+  return null;
+}
+
+function exactEventKey(query) {
+  return [query.seq ?? "", query.ts_ms ?? "", query.sourceId || "", query.connectionId || ""].join(":");
+}
+
+function eventMatchesExactQuery(event, query) {
+  if (String(event?.seq) !== String(query.seq)) return false;
+  if (query.ts_ms != null && Number(event?.ts_ms) !== Number(query.ts_ms)) return false;
+  if (query.sourceId && String(event?.sourceId || "") !== query.sourceId) return false;
+  if (query.connectionId && String(event?.connectionId || "") !== query.connectionId) return false;
+  return true;
+}
+
+function parseStoredEventLine(line, query) {
+  if (!line || !line.includes('"seq"')) return null;
+  try {
+    const event = JSON.parse(line);
+    return eventMatchesExactQuery(event, query) ? event : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheExactEvent(key, entry) {
+  exactEventCache.set(key, entry);
+  while (exactEventCache.size > EXACT_EVENT_CACHE_SIZE) exactEventCache.delete(exactEventCache.keys().next().value);
+  return entry;
+}
+
+function exactEventDetails(entry) {
+  const event = entry.event || {};
+  return {
+    source: entry.source,
+    original: {
+      raw: event.raw ?? "",
+      json: event.rawJson ?? null,
+      complete: true,
+      parseError: event.rawParseError || event.parseError || null,
+    },
+    capture: {
+      schema: event.schema ?? null,
+      seq: event.seq ?? null,
+      ts_ms: event.ts_ms ?? null,
+      pid: event.pid ?? null,
+      dir: event.dir || "unknown",
+      source: event.source || "local",
+      sourceId: event.sourceId || "",
+      transport: event.transport || "",
+      connectionId: event.connectionId || "",
+      codec: event.codec || "",
+    },
+    derived: {
+      method: event.method || null,
+      requestId: event.requestId || null,
+      sessionId: event.sessionId || null,
+      threadId: event.threadId || null,
+      turnId: event.turnId || null,
+      itemId: event.itemId || null,
+      itemType: event.itemType || null,
+      summary: event.summary || "",
+      parseError: event.parseError || null,
+      rawParseError: event.rawParseError || null,
+    },
+  };
 }
 
 function storageSegmentTime(filename) {
@@ -2297,6 +2405,30 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || "1000"), MAX_EVENTS));
     const events = ring.slice(-limit);
     sendJson(res, url.searchParams.get("compact") === "1" ? events.map(compactEvent) : events);
+    return;
+  }
+  if (url.pathname === "/api/event-details") {
+    const seq = url.searchParams.get("seq");
+    if (seq == null || seq === "") {
+      sendJson(res, { error: "seq is required" }, 400);
+      return;
+    }
+    try {
+      const tsParam = url.searchParams.get("ts_ms");
+      const entry = await findExactEvent({
+        seq,
+        ts_ms: tsParam == null || tsParam === "" ? null : Number(tsParam),
+        sourceId: url.searchParams.get("sourceId") || "",
+        connectionId: url.searchParams.get("connectionId") || "",
+      });
+      if (!entry) {
+        sendJson(res, { error: "event not found", seq }, 404);
+        return;
+      }
+      sendJson(res, exactEventDetails(entry));
+    } catch (error) {
+      sendJson(res, { error: error.message }, 500);
+    }
     return;
   }
   if (url.pathname === "/api/conversations") {

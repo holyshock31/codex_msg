@@ -2,6 +2,7 @@
 set -eu
 
 TRACE_BIN="${CODEX_TRACE_BIN:-$HOME/.local/codex_trace/bin}"
+CODEX_TRACE_DAEMON_URL="${CODEX_TRACE_DAEMON_URL:-tcp://127.0.0.1:45125}"
 
 CLEAN_PATH="$(printf '%s' "$PATH" | awk -v drop="$TRACE_BIN" '
 BEGIN { RS=":"; ORS="" }
@@ -41,6 +42,7 @@ esac
 
 if [ "${1:-}" = "app-server" ] && [ "${2:-}" = "proxy" ]; then
   export PATH="$CLEAN_PATH"
+  export CODEX_TRACE_DAEMON_URL
   exec "$TRACE_BIN/codex-proxy-trace" --real-codex "$REAL_CODEX" "$@"
 fi
 

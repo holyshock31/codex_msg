@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DAEMON = "tcp://127.0.0.1:45124"
+DEFAULT_DAEMON = "tcp://127.0.0.1:45125"
 
 
 def main() -> int:

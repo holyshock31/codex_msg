@@ -218,7 +218,7 @@ codex-trace-viewer
   -> trace ingest:     127.0.0.1:45124
 
 SSH RemoteForward:
-remote 127.0.0.1:45124
+remote 127.0.0.1:45125
   -> Windows 127.0.0.1:45124
 
 Remote:
@@ -229,7 +229,7 @@ codex shim
           -> remote daemon
 
 codex-proxy-trace
-  -> tcp://127.0.0.1:45124
+  -> tcp://127.0.0.1:45125
      # 这里的 remote localhost 通过 SSH RemoteForward 回到 Windows viewer ingest
 ```
 
@@ -246,17 +246,17 @@ Remote wrapper  -> SSH RemoteForward -> Windows viewer ingest
 
 ```sshconfig
 Host <codex-remote-host>
-  RemoteForward 127.0.0.1:45124 127.0.0.1:45124
+  RemoteForward 127.0.0.1:45125 127.0.0.1:45124
   ExitOnForwardFailure no
 ```
 
 远端 wrapper 的 daemon URL 仍配置成：
 
 ```text
-CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45124
+CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45125
 ```
 
-注意：远端进程看到的 `127.0.0.1:45124` 是 remote forward 入口，不是远端本地 viewer。`ExitOnForwardFailure no` 是为了保证 viewer 未启动或端口转发失败时，SSH 连接本身不要被 trace 功能阻断。wrapper 侧仍应支持本地 NDJSON fallback。
+注意：远端进程看到的 `127.0.0.1:45125` 是 remote forward 入口，不是远端本地 viewer；Windows Viewer 仍监听 `127.0.0.1:45124`。两侧使用不同端口是为了避免 WSL localhost forwarding 通过 `wslrelay.exe` 抢占 Windows `45124`。`ExitOnForwardFailure no` 是为了保证 viewer 未启动或端口转发失败时，SSH 连接本身不要被 trace 功能阻断。wrapper 侧仍应支持本地 NDJSON fallback。
 
 如果 Codex Desktop 使用的远端连接方式不读取用户 SSH config，则保留两个 fallback：
 
@@ -493,13 +493,13 @@ CODEX_INSTALL_DIR=/home/<user>/.local/codex_trace/bin
 真实 SSH 远端优先用 `RemoteForward`：
 
 ```sshconfig
-RemoteForward 127.0.0.1:45124 127.0.0.1:45124
+RemoteForward 127.0.0.1:45125 127.0.0.1:45124
 ```
 
 远端 wrapper 默认连：
 
 ```text
-CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45124
+CODEX_TRACE_DAEMON_URL=tcp://127.0.0.1:45125
 ```
 
 WSL2 NAT 模式下，如果不走 SSH tunnel，远端 wrapper 可以连接动态探测到的 Windows host gateway：
@@ -592,4 +592,4 @@ $s = $model.sessions | Where-Object id -eq '<root-thread-id>'
 $s.threads | Select-Object id,threadSource,parentThreadId,agentNickname,@{n='turns';e={($_.turns|Measure-Object).Count}},blocks,events
 ```
 
-预期 subagent 线程从 `0 turns / 0 blocks` 变为有 turn 和 blocks。`ssh <ssh-host>` 输出 `Warning: remote port forwarding failed for listen port 45124` 时，如果已有一条 SSH 连接占用了 `RemoteForward`，这个警告可以忽略；只要脚本能连到远端 `127.0.0.1:45124`，事件会经 SSH tunnel 回到 Windows viewer。
+预期 subagent 线程从 `0 turns / 0 blocks` 变为有 turn 和 blocks。`ssh <ssh-host>` 输出 `Warning: remote port forwarding failed for listen port 45125` 时，如果已有一条 SSH 连接占用了 `RemoteForward`，这个警告可以忽略；只要脚本能连到远端 `127.0.0.1:45125`，事件会经 SSH tunnel 回到 Windows viewer 的 `127.0.0.1:45124`。

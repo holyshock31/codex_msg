@@ -176,7 +176,7 @@ func run() (int, error) {
 func loadConfig(args []string) (config, error) {
 	cfg := config{
 		QueueCapacity: defaultQueueCap,
-		DaemonURL:     "tcp://127.0.0.1:45124",
+		DaemonURL:     "tcp://127.0.0.1:45125",
 		Source:        "remote",
 		Transport:     "ssh-proxy-websocket",
 	}
