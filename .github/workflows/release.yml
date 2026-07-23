@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to publish
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -14,8 +20,12 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
@@ -67,14 +77,14 @@ jobs:
           "$hash  CodexTrace.zip" | Set-Content .\dist\CodexTrace.zip.sha256 -Encoding ascii
       - name: Create SBOM
         shell: powershell
-        run: .\scripts\generate-sbom.ps1 -PackagePath .\dist\CodexTrace.zip -OutputPath .\dist\CodexTrace.cdx.json -Version $env:GITHUB_REF_NAME
+        run: .\scripts\generate-sbom.ps1 -PackagePath .\dist\CodexTrace.zip -OutputPath .\dist\CodexTrace.cdx.json -Version $env:RELEASE_TAG
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/CodexTrace.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: CodexTrace-windows-${{ github.ref_name }}
+          name: CodexTrace-windows-${{ env.RELEASE_TAG }}
           path: |
             dist/CodexTrace.zip
             dist/CodexTrace.zip.sha256
@@ -84,11 +94,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
+          gh release create $env:RELEASE_TAG `
             .\dist\CodexTrace.zip `
             .\dist\CodexTrace.zip.sha256 `
             .\dist\CodexTrace.cdx.json `
             --verify-tag `
             --generate-notes `
             --notes "This Windows release is not Authenticode-signed. Verify CodexTrace.zip with the published SHA-256 checksum and GitHub build provenance before installing. Windows or organization security policy may warn or block the wrapper executable." `
-            --title $env:GITHUB_REF_NAME
+            --title $env:RELEASE_TAG
