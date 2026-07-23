@@ -11,6 +11,7 @@ $PackageRoot = Join-Path $DistRoot $PackageName
 $ZipPath = Join-Path $DistRoot "$PackageName.zip"
 $WrapperProject = Join-Path $Root "codex-trace-wrapper"
 $WrapperExe = Join-Path $WrapperProject "dist\codex-trace-wrapper.exe"
+$ViewerRoot = Join-Path $Root "codex-trace-viewer"
 
 if (-not $SkipBuild) {
   & (Join-Path $WrapperProject "scripts\build-release.ps1")
@@ -62,10 +63,24 @@ New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "codex-trace-w
 Copy-Item -Path (Join-Path $Root "tools\release-config.toml") -Destination (Join-Path $PackageRoot "codex-trace-wrapper\config.toml") -Force
 
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "codex-trace-viewer") | Out-Null
-Copy-Item -Path (Join-Path $Root "codex-trace-viewer\server.js") -Destination (Join-Path $PackageRoot "codex-trace-viewer\server.js") -Force
-Copy-Item -Path (Join-Path $Root "codex-trace-viewer\package.json") -Destination (Join-Path $PackageRoot "codex-trace-viewer\package.json") -Force
-Copy-Item -Path (Join-Path $Root "codex-trace-viewer\public") -Destination (Join-Path $PackageRoot "codex-trace-viewer\public") -Recurse -Force
-Copy-Item -Path (Join-Path $Root "codex-trace-viewer\scripts") -Destination (Join-Path $PackageRoot "codex-trace-viewer\scripts") -Recurse -Force
+$PackageViewerRoot = Join-Path $PackageRoot "codex-trace-viewer"
+$viewerFiles = @("server.js", "text-encoding.js", "package.json", "package-lock.json")
+foreach ($viewerFile in $viewerFiles) {
+  $source = Join-Path $ViewerRoot $viewerFile
+  if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+    throw "Viewer release file not found: $source"
+  }
+  Copy-Item -LiteralPath $source -Destination (Join-Path $PackageViewerRoot $viewerFile) -Force
+}
+
+$viewerDependency = Join-Path $ViewerRoot "node_modules\iconv-lite\package.json"
+if (-not (Test-Path -LiteralPath $viewerDependency -PathType Leaf)) {
+  throw "Viewer production dependencies are missing. Run 'npm ci --omit=dev --ignore-scripts' in codex-trace-viewer before packaging."
+}
+
+Copy-Item -Path (Join-Path $ViewerRoot "public") -Destination (Join-Path $PackageViewerRoot "public") -Recurse -Force
+Copy-Item -Path (Join-Path $ViewerRoot "scripts") -Destination (Join-Path $PackageViewerRoot "scripts") -Recurse -Force
+Copy-Item -Path (Join-Path $ViewerRoot "node_modules") -Destination (Join-Path $PackageViewerRoot "node_modules") -Recurse -Force
 
 if (Test-Path -Path $ZipPath) {
   Remove-Item -Path $ZipPath -Force

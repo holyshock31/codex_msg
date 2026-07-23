@@ -15,9 +15,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20.x"
+          cache: npm
+          cache-dependency-path: codex-trace-viewer/package-lock.json
       - name: Test wrapper
         working-directory: codex-trace-wrapper
         run: go test ./...
+      - name: Install viewer dependencies
+        working-directory: codex-trace-viewer
+        run: npm ci --omit=dev --ignore-scripts
+      - name: Test viewer
+        working-directory: codex-trace-viewer
+        run: npm test
       - name: Check viewer syntax
         run: |
           node --check .\codex-trace-viewer\server.js
@@ -35,9 +43,21 @@ jobs:
           if (-not (Test-Path (Join-Path $root "bin\codex-trace-wrapper.exe"))) { throw "wrapper missing" }
           if (-not (Test-Path (Join-Path $root "bin\config.toml"))) { throw "config missing" }
           if (-not (Test-Path (Join-Path $root "codex-trace-viewer\server.js"))) { throw "viewer missing" }
+          if (-not (Test-Path (Join-Path $root "codex-trace-viewer\text-encoding.js"))) { throw "viewer encoding module missing" }
+          if (-not (Test-Path (Join-Path $root "codex-trace-viewer\node_modules\iconv-lite\package.json"))) { throw "viewer dependency missing" }
       - name: Build install package
         shell: powershell
         run: .\scripts\build-release-package.ps1 -SkipBuild
+      - name: Verify packaged runtime
+        shell: powershell
+        run: |
+          $viewer = Resolve-Path .\dist\CodexTrace\codex-trace-viewer
+          Push-Location $viewer
+          try {
+            node --input-type=module -e "import('./text-encoding.js').then(m => { if (typeof m.diagnoseTextEncoding !== 'function') process.exit(1) })"
+          } finally {
+            Pop-Location
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: CodexTrace-windows

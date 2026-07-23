@@ -218,11 +218,11 @@ CodexTrace.zip
 推送 `v*` 标签会触发 `.github/workflows/release.yml`：
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-工作流会运行 Go、Node 和 Review Store 测试，构建 `CodexTrace.zip`，生成 `CodexTrace.zip.sha256` 和 CycloneDX SBOM，并为 ZIP 生成 GitHub 构建来源证明。三个文件会发布到对应 GitHub Release。创建正式标签前，应先确认工作区已经脱敏，并在干净 Windows 环境验证安装包。
+工作流会运行 Go、Node 和 Review Store 测试，构建 `CodexTrace.zip`，生成 `CodexTrace.zip.sha256` 和 CycloneDX SBOM，并为 ZIP 生成 GitHub 构建来源证明。三个文件会发布到对应 GitHub Release。当前 wrapper 未进行 Authenticode 签名，Release 说明必须明确提示这一点。创建正式标签前，应先确认工作区已经脱敏，并在干净 Windows 环境验证安装包。
 
 ## 受管理 Windows 环境
 

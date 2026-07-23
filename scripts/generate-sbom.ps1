@@ -11,6 +11,7 @@ $PackagePath = (Resolve-Path -LiteralPath $PackagePath).Path
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $GoRoot = Join-Path $Root "codex-trace-wrapper"
 $ViewerPackagePath = Join-Path $Root "codex-trace-viewer\package.json"
+$ViewerLockPath = Join-Path $Root "codex-trace-viewer\package-lock.json"
 
 $packageHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash.ToUpperInvariant()
 $viewerPackage = Get-Content -LiteralPath $ViewerPackagePath -Raw | ConvertFrom-Json
@@ -71,6 +72,49 @@ foreach ($line in $moduleLines) {
     name = $modulePath
     version = $moduleVersion
     purl = $purl
+  }
+}
+
+if (Test-Path -LiteralPath $ViewerLockPath -PathType Leaf) {
+  Push-Location (Split-Path -Parent $ViewerLockPath)
+  try {
+    $npmTreeJson = (& npm ls --omit=dev --json --all) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) {
+      throw "npm ls failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
+
+  $npmTree = $npmTreeJson | ConvertFrom-Json
+  $npmSeen = @{}
+  $npmQueue = New-Object System.Collections.Queue
+  if ($npmTree.dependencies) {
+    $npmQueue.Enqueue($npmTree.dependencies)
+  }
+  while ($npmQueue.Count -gt 0) {
+    $dependencySet = $npmQueue.Dequeue()
+    foreach ($property in $dependencySet.PSObject.Properties) {
+      $npmName = [string]$property.Name
+      $npmVersion = [string]$property.Value.version
+      if ([string]::IsNullOrWhiteSpace($npmName) -or [string]::IsNullOrWhiteSpace($npmVersion)) {
+        continue
+      }
+      $npmPurl = "pkg:npm/$npmName@$npmVersion"
+      if (-not $npmSeen.ContainsKey($npmPurl)) {
+        $npmSeen[$npmPurl] = $true
+        $components += [ordered]@{
+          type = "library"
+          "bom-ref" = $npmPurl
+          name = $npmName
+          version = $npmVersion
+          purl = $npmPurl
+        }
+      }
+      if ($property.Value.dependencies) {
+        $npmQueue.Enqueue($property.Value.dependencies)
+      }
+    }
   }
 }
 

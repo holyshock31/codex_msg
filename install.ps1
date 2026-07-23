@@ -216,6 +216,44 @@ function Assert-CodexTraceNodeRuntime {
   }
 }
 
+function Install-CodexTraceViewerDependencies {
+  param([Parameter(Mandatory = $true)][string]$SourceRoot)
+
+  $viewerRoot = Join-Path $SourceRoot "codex-trace-viewer"
+  $dependencyPath = Join-Path $viewerRoot "node_modules\iconv-lite\package.json"
+  if (Test-Path -LiteralPath $dependencyPath -PathType Leaf) {
+    return
+  }
+
+  $packageLock = Join-Path $viewerRoot "package-lock.json"
+  if (-not (Test-Path -LiteralPath $packageLock -PathType Leaf)) {
+    throw "Viewer dependencies are missing and package-lock.json was not found: $packageLock"
+  }
+
+  $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if ($null -eq $npmCommand) {
+    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+  }
+  if ($null -eq $npmCommand) {
+    throw "npm is required to install viewer dependencies from a source checkout. Install Node.js 20 or newer, reopen PowerShell, and rerun .\codex-trace.ps1 install."
+  }
+
+  Write-Host "Installing locked viewer production dependencies."
+  Push-Location $viewerRoot
+  try {
+    & $npmCommand.Source ci --omit=dev --ignore-scripts
+    if ($LASTEXITCODE -ne 0) {
+      throw "npm ci failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
+
+  if (-not (Test-Path -LiteralPath $dependencyPath -PathType Leaf)) {
+    throw "Viewer dependency installation completed without creating: $dependencyPath"
+  }
+}
+
 $SourceRoot = (Resolve-Path $PSScriptRoot).Path
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
   $InstallRoot = Join-Path $env:USERPROFILE "Documents\CodexTrace"
@@ -264,6 +302,8 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
 if (-not $NoStartViewer) {
   Assert-CodexTraceNodeRuntime -SourceRoot $SourceRoot
 }
+
+Install-CodexTraceViewerDependencies -SourceRoot $SourceRoot
 
 if (-not $NoStartViewer) {
   Stop-CodexTraceViewer -Root $InstallRoot

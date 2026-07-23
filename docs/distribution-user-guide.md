@@ -4,6 +4,8 @@
 
 发布包使用 MIT License，许可证文件随 ZIP 和安装目录分发。
 
+当前 Windows wrapper 尚未进行 Authenticode 代码签名。下载后应使用 Release 提供的 SHA-256 文件校验 ZIP，并核对 GitHub 构建来源证明；Windows 或组织安全策略仍可能警告或阻止未签名程序。
+
 ## 推荐方式
 
 推荐使用 zip 包分发：
