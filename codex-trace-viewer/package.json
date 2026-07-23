@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/conversation-segments.test.js tests/text-encoding.test.js"
   },
   "engines": {
     "node": ">=20"
